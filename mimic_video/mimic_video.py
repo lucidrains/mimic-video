@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from einops import einsum
 from einops.layers.torch import Rearrange
 
+from x_mlps_pytorch import create_mlp
+
 # ein notation
 
 # b - batch
@@ -91,6 +93,28 @@ class Attention(Module):
         out = self.merge_heads(out)
 
         return self.to_out(out)
+
+# feedforward
+
+class SwiGLUFeedForward(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        expansion_factor = 4.,
+    ):
+        super().__init__()
+        dim_inner = int(dim * expansion_factor * 2 / 3)
+
+        self.proj_in = nn.Linear(dim, dim_inner * 2)
+        self.proj_out = nn.Linear(dim_inner, dim)
+
+    def forward(self, x):
+        x, gates = self.proj_in(x).chunk(2, dim = -1)
+
+        x = x * F.gelu(gates)
+
+        return self.proj_out(x)
 
 # classes
 

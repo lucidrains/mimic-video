@@ -27,7 +27,8 @@ dependencies = [
     "einx>=0.3.0",
     "einops>=0.8.1",
     "torch>=2.5",
-    "torch-einops-utils>=0.0.8"
+    "torch-einops-utils>=0.0.8",
+    "x-mlps-pytorch"
 ]
 
 [project.urls]
