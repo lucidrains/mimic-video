@@ -4,6 +4,10 @@
 
 Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Models for Generalizable Robot Control Beyond VLAs
 
+## Appreciation
+
+- [Pranoy](https://github.com/pranoyr) for submitting a pull request for proprioception masking
+
 ## Contributing
 
 First make sure `pytest` and test dependencies are installed with
