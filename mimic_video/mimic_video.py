@@ -4,10 +4,12 @@ from torch.nn import Module, ModuleList, Linear
 
 import torch.nn.functional as F
 
-from einops import einsum
+from einops import einsum, rearrange
 from einops.layers.torch import Rearrange
 
 from x_mlps_pytorch import create_mlp
+
+from torch_einops_utils import pad_left_ndim
 
 # ein notation
 
@@ -33,6 +35,46 @@ def divisible_by(num, den):
 
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
+
+def l2norm(t, eps = 1e-10):
+    return F.normalize(t, dim = -1, eps = eps)
+
+# adaptive rmsnorm
+
+class AdaptiveRMSNorm(Module):
+    def __init__(
+        self,
+        dim,
+        dim_time_cond,
+        eps = 1e-6
+    ):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.eps = eps
+
+        self.to_modulation = Linear(dim_time_cond, dim * 3, bias = False)
+        self.split_modulation = Rearrange('b (three d) -> three b 1 d', three = 3)
+
+        nn.init.zeros_(self.to_modulation.weight)
+
+    def forward(
+        self,
+        tokens,
+        time_cond
+    ):
+
+        if time_cond.ndim == 1:
+            time_cond = pad_left_ndim(time_cond, 1)
+
+        modulations = self.to_modulation(time_cond)
+
+        scale, shift, gate = self.split_modulation(modulations)
+
+        normed = l2norm(tokens, self.eps) * self.scale
+
+        adaptive_normed = normed * (scale + 1.) + shift
+
+        return adaptive_normed, gate
 
 # attention
 
@@ -109,12 +151,15 @@ class SwiGLUFeedForward(Module):
         self.proj_in = nn.Linear(dim, dim_inner * 2)
         self.proj_out = nn.Linear(dim_inner, dim)
 
-    def forward(self, x):
-        x, gates = self.proj_in(x).chunk(2, dim = -1)
+    def forward(
+        self,
+        tokens
+    ):
+        hidden, gates = self.proj_in(tokens).chunk(2, dim = -1)
 
-        x = x * F.gelu(gates)
+        out = hidden * F.gelu(gates)
 
-        return self.proj_out(x)
+        return self.proj_out(out)
 
 # classes
 
