@@ -1,11 +1,11 @@
 import torch
-from torch import nn, cat
+from torch import nn, cat, stack, is_tensor, tensor
 from torch.nn import Module, ModuleList, Linear
 
 import torch.nn.functional as F
 
 import einx
-from einops import einsum, rearrange
+from einops import einsum, rearrange, repeat
 from einops.layers.torch import Rearrange
 
 from x_mlps_pytorch import create_mlp
@@ -38,6 +38,9 @@ def divisible_by(num, den):
     return (num % den) == 0
 
 # tensor function
+
+def cast_tensor(val, device = None):
+    return tensor(val, device = device) if not is_tensor(val) else val
 
 def max_neg_value(t):
     return -torch.finfo(t.dtype).max
@@ -226,10 +229,8 @@ class MimicVideo(Module):
 
         dim_time_cond = default(dim_time_cond, dim * 2)
 
-        self.to_time_cond = nn.Sequential(
-            RandomFourierEmbed(dim),
-            create_mlp(dim_in = dim, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
-        )
+        self.to_fourier_embed = RandomFourierEmbed(dim) # used by deepmind, its fine
+        self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
 
         self.to_joint_state_token = Linear(dim_joint_state, dim)
 
@@ -277,16 +278,16 @@ class MimicVideo(Module):
         *,
         joint_state,
         time = None,
+        time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         context_mask = None,
     ):
+        batch, device = actions.shape[0], actions.device
 
         is_training = not exists(time)
 
         # handle flow time conditioning
 
         if is_training:
-            batch, device = actions.shape[0], actions.device
-
             time = torch.rand((batch,), device = device)
             time = self.sample_time_fn(time)
 
@@ -299,7 +300,28 @@ class MimicVideo(Module):
         else:
             noised = actions
 
-        time_cond = self.to_time_cond(time)
+        if time.ndim == 0:
+            time = rearrange(time, '-> b', b = batch)
+
+        # handle the video denoising times
+
+        time_video_denoise = cast_tensor(time_video_denoise)
+
+        if time_video_denoise.ndim == 0:
+            time_video_denoise = rearrange(time_video_denoise, '-> 1')
+
+        if time_video_denoise.shape[0] != batch:
+            time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
+
+        times = stack((time, time_video_denoise), dim = -1)
+
+        # fourier embed and mlp to time condition
+
+        fourier_embed = self.to_fourier_embed(times)
+
+        fourier_embed = rearrange(fourier_embed, '... times d -> ... (times d)')
+
+        time_cond = self.to_time_cond(fourier_embed)
 
         # handle video hiddens
 
