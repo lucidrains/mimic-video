@@ -233,6 +233,8 @@ class MimicVideo(Module):
         self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
 
         self.to_joint_state_token = Linear(dim_joint_state, dim)
+        
+        self.proprio_mask_token = nn.Parameter(torch.randn(dim))
 
         self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
@@ -331,7 +333,11 @@ class MimicVideo(Module):
 
         tokens = self.to_action_tokens(noised)
 
-        joint_state_token = self.to_joint_state_token(joint_state)
+        #  mask joint state token for proprioception masking training
+        if self.training and torch.rand(1) < 0.1: 
+            joint_state_token = repeat(self.proprio_mask_token, 'd -> b d', b=batch)
+        else:
+            joint_state_token = self.to_joint_state_token(joint_state)
 
         tokens, inverse_pack = pack_with_inverse((joint_state_token, tokens), 'b * d')
 
