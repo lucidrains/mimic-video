@@ -85,7 +85,8 @@ class AdaptiveRMSNorm(Module):
         self,
         dim,
         dim_time_cond,
-        eps = 1e-6
+        eps = 1e-6,
+        ada_ln_zero_bias = -5.
     ):
         super().__init__()
         self.scale = dim ** 0.5
@@ -95,6 +96,8 @@ class AdaptiveRMSNorm(Module):
         self.split_modulation = Rearrange('b (three d) -> three b 1 d', three = 3)
 
         nn.init.zeros_(self.to_modulation.weight)
+
+        self.ada_ln_zero_bias = ada_ln_zero_bias
 
     def forward(
         self,
@@ -113,7 +116,9 @@ class AdaptiveRMSNorm(Module):
 
         adaptive_normed = normed * (scale + 1.) + shift
 
-        return adaptive_normed, gate
+        gate_with_bias = gate + self.ada_ln_zero_bias
+
+        return adaptive_normed, gate_with_bias
 
 # attention
 
@@ -215,6 +220,7 @@ class MimicVideo(Module):
         dim_head = 64,
         heads = 8,
         expansion_factor = 4.,
+        ada_ln_zero_bias = -5.,
         dim_time_cond = None,
         sample_time_fn = None
     ):
@@ -259,7 +265,7 @@ class MimicVideo(Module):
 
             cross_attn = Attention(dim = dim, dim_head = dim_head, dim_context = dim_video_hidden, heads = heads)
 
-            ff_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
+            ff_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond, ada_ln_zero_bias = ada_ln_zero_bias)
 
             ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
 
@@ -379,7 +385,7 @@ class MimicVideo(Module):
 
             tokens, gate = attn_norm(tokens, time_cond)
 
-            tokens = residual + attn(tokens) * gate
+            tokens = residual + attn(tokens) * gate.sigmoid()
 
             # prepare feedforward
 
@@ -397,7 +403,7 @@ class MimicVideo(Module):
 
             # feedforward
 
-            tokens = residual + ff(tokens) * gate
+            tokens = residual + ff(tokens) * gate.sigmoid()
 
         # remove joint token
 
