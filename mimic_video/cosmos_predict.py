@@ -14,6 +14,9 @@ from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 def exists(v):
     return v is not None
 
+def identity(t):
+    return t
+
 def default(v, d):
     return v if exists(v) else d
 
@@ -102,7 +105,8 @@ class CosmosPredictWrapper(nn.Module):
         torch_dtype: torch.dtype = torch.bfloat16,
         extract_layer: int = 19,
         random_weights: bool = False,
-        tiny: bool = False
+        tiny: bool = False,
+        normalize = lambda t: (t - 0.5) * 2.0
     ):
         super().__init__()
         self.device = device
@@ -121,7 +125,10 @@ class CosmosPredictWrapper(nn.Module):
         
         # store hidden dim for consumers
         self.dim_latent = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
-        
+
+        # maybe normalize
+        self.normalize = normalize
+
         self._register_hook()
 
     def _init_pretrained(self, model_name: str):
@@ -138,7 +145,7 @@ class CosmosPredictWrapper(nn.Module):
         self.transformer = pipeline.transformer.to(self.device)
         self.text_encoder = pipeline.text_encoder.to(self.device)
         self.tokenizer = pipeline.tokenizer
-        
+
         # Clean up pipeline
         del pipeline
 
@@ -193,7 +200,8 @@ class CosmosPredictWrapper(nn.Module):
         b, t, c, h, w = videos.shape
 
         # Scale videos from [0, 1] to [-1, 1] for Cosmos VAE
-        videos = (videos - 0.5) * 2.0
+
+        videos = self.normalize(videos)
         
         prompts = default(prompts, [""] * b)
         if isinstance(prompts, str):
