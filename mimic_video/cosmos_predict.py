@@ -191,6 +191,9 @@ class CosmosPredictWrapper(nn.Module):
         returns: hidden states tensor from the specified transformer layer (from first step)
         """
         b, t, c, h, w = videos.shape
+
+        # Scale videos from [0, 1] to [-1, 1] for Cosmos VAE
+        videos = (videos - 0.5) * 2.0
         
         prompts = default(prompts, [""] * b)
         if isinstance(prompts, str):
