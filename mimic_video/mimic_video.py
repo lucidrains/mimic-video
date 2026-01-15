@@ -338,6 +338,8 @@ class MimicVideo(Module):
         **kwargs
     ):
 
+        self.eval()
+
         noise = torch.randn((batch_size, *self.action_shape), device = self.device)
 
         times = torch.linspace(0., 1., steps + 1, device = self.device)[:-1]
@@ -367,14 +369,15 @@ class MimicVideo(Module):
         prompts = None,
         prompt_token_ids = None,
         cache = None,
-        return_cache = False
+        return_cache = False,
+        return_flow = False
     ):
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
         assert actions.shape[-2:] == self.action_shape
 
         batch, device = actions.shape[0], actions.device
 
-        is_training = not exists(time)
+        is_training = not exists(time) and not return_flow
 
         if not exists(cache):
             # handle maybe extraction of video hiddens
