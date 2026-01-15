@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
+from torch.nn import Module
 from torch import nn, Tensor
 from einops import rearrange
 
@@ -92,7 +96,7 @@ REAL_T5_CONFIG = dict(
 
 # main class
 
-class CosmosPredictWrapper(nn.Module):
+class CosmosPredictWrapper(Module):
     """
     Wraps Cosmos VAE + DiT for extracting hidden states from a video.
     Supports proper EDM Euler denoising steps.
@@ -100,17 +104,13 @@ class CosmosPredictWrapper(nn.Module):
     
     def __init__(
         self,
-        model_name: str = "nvidia/Cosmos-1.0-Diffusion-7B-Video2World",
-        device: str = "cuda",
-        torch_dtype: torch.dtype = torch.bfloat16,
+        model_name: str = 'nvidia/Cosmos-1.0-Diffusion-7B-Video2World',
         extract_layer: int = 19,
         random_weights: bool = False,
         tiny: bool = False,
         normalize = lambda t: (t - 0.5) * 2.0
     ):
         super().__init__()
-        self.device = device
-        self.torch_dtype = torch_dtype
         self.extract_layer = extract_layer
         self.hook_handle = None
         self.cached_hidden_states: list[Tensor] = []
@@ -131,19 +131,20 @@ class CosmosPredictWrapper(nn.Module):
 
         self._register_hook()
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def _init_pretrained(self, model_name: str):
         """Load pretrained weights from HuggingFace"""
         from diffusers import CosmosVideoToWorldPipeline
         
-        pipeline = CosmosVideoToWorldPipeline.from_pretrained(
-            model_name, 
-            torch_dtype = self.torch_dtype
-        )
+        pipeline = CosmosVideoToWorldPipeline.from_pretrained(model_name)
         
         # Extract components we need
-        self.vae = pipeline.vae.to(self.device)
-        self.transformer = pipeline.transformer.to(self.device)
-        self.text_encoder = pipeline.text_encoder.to(self.device)
+        self.vae = pipeline.vae
+        self.transformer = pipeline.transformer
+        self.text_encoder = pipeline.text_encoder
         self.tokenizer = pipeline.tokenizer
 
         # Clean up pipeline
@@ -163,12 +164,12 @@ class CosmosPredictWrapper(nn.Module):
         self.transformer = CosmosTransformer3DModel(
             num_layers = num_layers,
             **transformer_config
-        ).to(device = self.device, dtype = self.torch_dtype)
+        )
         
-        self.vae = AutoencoderKLCosmos(**vae_config).to(device = self.device, dtype = self.torch_dtype)
+        self.vae = AutoencoderKLCosmos(**vae_config)
         
         t5_config = T5Config(**t5_config_dict)
-        self.text_encoder = T5EncoderModel(t5_config).to(device = self.device, dtype = self.torch_dtype)
+        self.text_encoder = T5EncoderModel(t5_config)
         self.tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
 
     def __del__(self):
@@ -213,7 +214,6 @@ class CosmosPredictWrapper(nn.Module):
         
         # Move video to device and rearrange for VAE: (B, T, C, H, W) -> (B, C, T, H, W)
         videos = rearrange(videos, 'b t c h w -> b c t h w')
-        videos = videos.to(device=self.device, dtype=self.torch_dtype)
         
         with torch.inference_mode():
             # 1. encode video to latents via VAE
@@ -223,21 +223,20 @@ class CosmosPredictWrapper(nn.Module):
             # 2. maybe encode text prompts
 
             if exists(prompt_token_ids):
-                text_inputs = dict(input_ids = prompt_token_ids.to(self.device))
+                text_inputs = dict(input_ids = prompt_token_ids)
             else:
                 text_inputs = self.tokenizer(
                     prompts, 
-                    return_tensors="pt", 
-                    padding=True, 
-                    truncation=True,
-                    max_length=512
-                ).to(self.device)
-            
+                    return_tensors = "pt",
+                    padding = True,
+                    truncation = True,
+                    max_length = 512
+                )
+
             encoder_hidden_states = self.text_encoder(**text_inputs).last_hidden_state
-            encoder_hidden_states = encoder_hidden_states.to(dtype=self.torch_dtype)
             
             # 3. Setup scheduler timesteps
-            self.scheduler.set_timesteps(num_inference_steps, device=self.device)
+            self.scheduler.set_timesteps(num_inference_steps, device = self.device)
             timesteps = self.scheduler.timesteps
             
             # 4. Add noise to latents (start from pure noise scaled by initial sigma)
