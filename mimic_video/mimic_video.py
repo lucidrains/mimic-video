@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import partial
 
 import torch
 from torch import nn, cat, stack, is_tensor, tensor
@@ -29,6 +30,10 @@ from torch_einops_utils import (
 # n - sequence
 # i, j - sequence (source, target)
 # d - feature dimension
+
+# constants
+
+LinearNoBias = partial(Linear, bias = False)
 
 # functions
 
@@ -96,7 +101,7 @@ class AdaptiveRMSNorm(Module):
         self.scale = dim ** 0.5
         self.eps = eps
 
-        self.to_modulation = Linear(dim_time_cond, dim * 3, bias = False)
+        self.to_modulation = LinearNoBias(dim_time_cond, dim * 3)
         self.split_modulation = Rearrange('b (three d) -> three b 1 d', three = 3)
 
         nn.init.zeros_(self.to_modulation.weight)
@@ -134,7 +139,8 @@ class Attention(Module):
         dim_context = None,
         dim_head = 64,
         heads = 8,
-        kv_heads = 2
+        kv_heads = 2,
+        attn_gate_value = True
     ):
         super().__init__()
         dim_q_inner = dim_head * heads
@@ -143,9 +149,12 @@ class Attention(Module):
 
         self.scale = dim_head ** -0.5
 
-        self.to_queries = Linear(dim, dim_q_inner, bias = False)
-        self.to_keys_values = Linear(dim_context, dim_kv_inner * 2, bias = False)
-        self.to_out = Linear(dim_q_inner, dim, bias = False)
+        self.to_queries = LinearNoBias(dim, dim_q_inner)
+        self.to_keys_values = LinearNoBias(dim_context, dim_kv_inner * 2)
+
+        self.attn_gate_value = nn.Sequential(LinearNoBias(dim, heads), Rearrange('b n (g h) -> b g h n 1', h = kv_heads))
+
+        self.to_out = LinearNoBias(dim_q_inner, dim)
 
         assert divisible_by(heads, kv_heads)
         groups = heads // kv_heads
@@ -184,6 +193,8 @@ class Attention(Module):
         attn = sim.softmax(dim = -1)
 
         out = einsum(attn, values, 'b g h i j, b h j d -> b g h i d')
+
+        out = out * self.attn_gate_value(tokens).sigmoid()
 
         out = self.merge_heads(out)
 
@@ -393,7 +404,8 @@ class MimicVideo(Module):
                 assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
                 video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
-                video_hiddens = video_hiddens.float() # maybe bfloat to float32
+
+                video_hiddens = video_hiddens.to(self.device).float() # maybe bfloat to float32
 
                 video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
 
