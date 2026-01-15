@@ -314,8 +314,11 @@ class MimicVideo(Module):
         joint_state,
         time = None,
         time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
+        prompts = None,
+        prompt_token_ids = None,
         context_mask = None,
     ):
+        assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
         assert actions.shape[-1] == self.dim_action
 
         batch, device = actions.shape[0], actions.device
@@ -329,7 +332,7 @@ class MimicVideo(Module):
         if not exists(video_hiddens):
             assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
-            video_hiddens = self.video_predict_wrapper(video)
+            video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
             video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
 
             assert video_hiddens.shape[-1] == self.dim_video_hidden

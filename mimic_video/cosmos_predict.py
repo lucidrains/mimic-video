@@ -163,12 +163,12 @@ class CosmosPredictWrapper(nn.Module):
         self.transformer = CosmosTransformer3DModel(
             num_layers = num_layers,
             **transformer_config
-        ).to(self.device)
+        ).to(device = self.device, dtype = self.torch_dtype)
         
-        self.vae = AutoencoderKLCosmos(**vae_config).to(self.device)
+        self.vae = AutoencoderKLCosmos(**vae_config).to(device = self.device, dtype = self.torch_dtype)
         
         t5_config = T5Config(**t5_config_dict)
-        self.text_encoder = T5EncoderModel(t5_config).to(self.device)
+        self.text_encoder = T5EncoderModel(t5_config).to(device = self.device, dtype = self.torch_dtype)
         self.tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
 
     def __del__(self):
@@ -190,6 +190,7 @@ class CosmosPredictWrapper(nn.Module):
         self,
         videos: Tensor,
         prompts: str | list[str] | None = None,
+        prompt_token_ids: Tensor | None = None,
         num_inference_steps: int = 1,
     ) -> Tensor:
         """
@@ -197,15 +198,16 @@ class CosmosPredictWrapper(nn.Module):
         num_inference_steps: number of denoising steps to run
         returns: hidden states tensor from the specified transformer layer (from first step)
         """
-        b, t, c, h, w = videos.shape
+        batch, t, c, h, w = videos.shape
+
+        assert exists(prompts) ^ exists(prompt_token_ids)
 
         # Scale videos from [0, 1] to [-1, 1] for Cosmos VAE
 
         videos = self.normalize(videos)
-        
-        prompts = default(prompts, [""] * b)
+
         if isinstance(prompts, str):
-            prompts = [prompts] * b
+            prompts = [prompts] * batch
 
         self.cached_hidden_states.clear()
         
@@ -214,17 +216,22 @@ class CosmosPredictWrapper(nn.Module):
         videos = videos.to(device=self.device, dtype=self.torch_dtype)
         
         with torch.inference_mode():
-            # 1. Encode video to latents via VAE
+            # 1. encode video to latents via VAE
+
             latents = self.vae.encode(videos).latent_dist.sample()
             
-            # 2. Encode text prompts
-            text_inputs = self.tokenizer(
-                prompts, 
-                return_tensors="pt", 
-                padding=True, 
-                truncation=True,
-                max_length=512
-            ).to(self.device)
+            # 2. maybe encode text prompts
+
+            if exists(prompt_token_ids):
+                text_inputs = dict(input_ids = prompt_token_ids.to(self.device))
+            else:
+                text_inputs = self.tokenizer(
+                    prompts, 
+                    return_tensors="pt", 
+                    padding=True, 
+                    truncation=True,
+                    max_length=512
+                ).to(self.device)
             
             encoder_hidden_states = self.text_encoder(**text_inputs).last_hidden_state
             encoder_hidden_states = encoder_hidden_states.to(dtype=self.torch_dtype)
@@ -244,14 +251,14 @@ class CosmosPredictWrapper(nn.Module):
                 
                 # Predict noise residual
                 noise_pred = self.transformer(
-                    hidden_states=latent_model_input,
-                    encoder_hidden_states=encoder_hidden_states,
-                    timestep=timestep.expand(b),
-                    return_dict=False
+                    hidden_states = latent_model_input,
+                    encoder_hidden_states = encoder_hidden_states,
+                    timestep = timestep.expand(batch),
+                    return_dict = False
                 )[0]
                 
                 # Compute previous noisy sample
-                latents = self.scheduler.step(noise_pred, timestep, latents, return_dict=False)[0]
+                latents = self.scheduler.step(noise_pred, timestep, latents, return_dict = False)[0]
 
         assert len(self.cached_hidden_states) > 0, 'hidden states not captured'
         

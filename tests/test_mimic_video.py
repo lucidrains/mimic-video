@@ -43,5 +43,11 @@ def test_e2e():
 
     joint_state = torch.randn(1, 32)
 
-    loss = model(video = video, actions = actions, joint_state = joint_state)
+    loss = model(
+        video = video,
+        actions = actions,
+        joint_state = joint_state,
+        prompts = 'put the package on the conveyer belt'
+    )
+
     loss.backward()
