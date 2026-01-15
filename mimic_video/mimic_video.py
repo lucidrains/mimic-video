@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn, cat, stack, is_tensor, tensor
-from torch.nn import Module, ModuleList, Linear
+from torch.nn import Module, ModuleList, Linear, GRU
 
 import torch.nn.functional as F
 
@@ -288,6 +288,10 @@ class MimicVideo(Module):
 
         self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
+        # rnn
+
+        self.rnn = GRU(dim, dim)
+
         # transformer
 
         layers = []
@@ -445,6 +449,11 @@ class MimicVideo(Module):
         # embed
 
         tokens = self.to_action_tokens(noised)
+
+        # one layer of rnn for actions
+
+        rnn_out, _, = self.rnn(tokens)
+        tokens = rnn_out + tokens
 
         #  mask joint state token for proprioception masking training
 
