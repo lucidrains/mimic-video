@@ -12,6 +12,8 @@ from einops.layers.torch import Rearrange
 
 from x_mlps_pytorch import create_mlp
 
+from tqdm import tqdm
+
 from torch_einops_utils import (
     pad_left_ndim,
     align_dims_left,
@@ -226,6 +228,7 @@ class MimicVideo(Module):
         video_predict_wrapper: Module | None = None,
         *,
         dim_video_hidden = None,
+        action_chunk_len = 32,
         dim_action = 20,
         dim_joint_state = 32,
         proprio_mask_prob = 0.1,
@@ -247,7 +250,10 @@ class MimicVideo(Module):
 
         # dims
 
+        self.action_chunk_len = action_chunk_len
         self.dim_action = dim_action
+
+        self.action_shape = (action_chunk_len, dim_action)
         self.dim_joint_state = dim_joint_state
 
         dim_video_hidden = default(dim_video_hidden, video_predict_wrapper.dim_latent if exists(video_predict_wrapper) else None)
@@ -317,14 +323,45 @@ class MimicVideo(Module):
             Linear(dim, dim_action, bias = False)
         )
 
+        self.register_buffer('zero', tensor(0.), persistent = False)
+
+    @property
+    def device(self):
+        return self.zero.device
+
+    @torch.no_grad()
+    def sample(
+        self,
+        steps = 16,
+        batch_size = 1,
+        disable_progress_bar = False,
+        **kwargs
+    ):
+
+        noise = torch.randn((batch_size, *self.action_shape), device = self.device)
+
+        times = torch.linspace(0., 1., steps + 1, device = self.device)[:-1]
+        delta = 1. / steps
+
+        denoised = noise
+
+        cache = None
+
+        for time in tqdm(times, disable = disable_progress_bar):
+            pred_flow, cache = self.forward(actions = denoised, time = time, return_cache = True, **kwargs)
+
+            denoised = denoised + delta * pred_flow
+
+        return denoised
+
     def forward(
         self,
         *,
         actions,
+        joint_state,
         video = None,
         video_hiddens = None, # they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
-        joint_state,
         time = None,
         time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
         prompts = None,
@@ -333,7 +370,7 @@ class MimicVideo(Module):
         return_cache = False
     ):
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
-        assert actions.shape[-1] == self.dim_action
+        assert actions.shape[-2:] == self.action_shape
 
         batch, device = actions.shape[0], actions.device
 
@@ -349,6 +386,8 @@ class MimicVideo(Module):
                 assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
                 video_hiddens = self.video_predict_wrapper(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
+                video_hiddens = video_hiddens.float() # maybe bfloat to float32
+
                 video_hiddens, _ = pack_with_inverse(video_hiddens, 'b * d')
 
                 assert video_hiddens.shape[-1] == self.dim_video_hidden
@@ -378,7 +417,7 @@ class MimicVideo(Module):
             noised = actions
 
         if time.ndim == 0:
-            time = rearrange(time, '-> b', b = batch)
+            time = repeat(time, '-> b', b = batch)
 
         # handle the video denoising times
 

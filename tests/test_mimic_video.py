@@ -28,8 +28,6 @@ def test_e2e():
     from mimic_video.cosmos_predict import CosmosPredictWrapper
 
     video_wrapper = CosmosPredictWrapper(
-        device = 'cpu',
-        torch_dtype = torch.float32,
         extract_layer = 1,
         random_weights = True,
         tiny = True
@@ -51,3 +49,6 @@ def test_e2e():
     )
 
     loss.backward()
+
+    pred_actions = model.sample(video = video, joint_state = joint_state, prompts = 'pass the butter')
+    assert pred_actions.shape == (1, 32, 20)
