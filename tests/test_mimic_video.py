@@ -1,13 +1,18 @@
 import pytest
+param = pytest.mark.parametrize
+
 import torch
 
-def test_mimic_video():
+@param('num_residual_streams', (1, 4))
+def test_mimic_video(
+    num_residual_streams
+):
     from mimic_video.mimic_video import MimicVideo
 
     video_hiddens = torch.randn(2, 64, 77)
     video_mask = torch.randint(0, 2, (2, 64)).bool()
 
-    mimic_video = MimicVideo(512, dim_video_hidden = 77)
+    mimic_video = MimicVideo(512, dim_video_hidden = 77, num_residual_streams = num_residual_streams)
 
     actions = torch.randn(2, 32, 20)
 
@@ -23,7 +28,10 @@ def test_mimic_video():
 
     assert flow.shape == actions.shape
 
-def test_e2e():
+@param('num_residual_streams', (1, 4))
+def test_e2e(
+    num_residual_streams
+):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
 
@@ -33,7 +41,7 @@ def test_e2e():
         tiny = True
     )
 
-    model = MimicVideo(512, video_wrapper)
+    model = MimicVideo(512, video_wrapper, num_residual_streams = num_residual_streams)
 
     video = torch.rand(1, 3, 3, 32, 32)
 

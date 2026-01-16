@@ -22,6 +22,8 @@ from torch_einops_utils import (
     pack_with_inverse,
 )
 
+from hyper_connections.mHCv2 import get_init_and_expand_reduce_stream_functions
+
 # ein notation
 
 # b - batch
@@ -249,7 +251,9 @@ class MimicVideo(Module):
         expansion_factor = 4.,
         ada_ln_zero_bias = -5.,
         dim_time_cond = None,
-        sample_time_fn = None
+        sample_time_fn = None,
+        num_residual_streams = 1,
+        mhc_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -299,6 +303,10 @@ class MimicVideo(Module):
 
         self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
 
+        # manifold constrained hyper connections (mHC) from bytedance + deepseek
+
+        init_hyper_conn, self.expand_stream, self.reduce_stream = get_init_and_expand_reduce_stream_functions(num_residual_streams, dim = dim, add_stream_embed = True, **mhc_kwargs)
+
         # rnn
 
         self.rnn = GRU(dim, dim)
@@ -320,11 +328,20 @@ class MimicVideo(Module):
 
             ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
 
+            # maybe hyper connect
+
+            attn_residual = init_hyper_conn()
+            cross_attn_residual = init_hyper_conn()
+            ff_residual = init_hyper_conn()
+
             layers.append(ModuleList([
-                attn_adanorm,
-                attn,
+                cross_attn_residual,
                 cross_attn_adanorm,
                 cross_attn,
+                attn_residual,
+                attn_adanorm,
+                attn,
+                ff_residual,
                 ff_adanorm,
                 ff
             ]))
@@ -480,41 +497,48 @@ class MimicVideo(Module):
 
         tokens, inverse_pack = pack_with_inverse((joint_state_token, tokens), 'b * d')
 
+        # maybe expand streams
+
+        tokens = self.expand_stream(tokens)
+
         # transformer layers
 
         for ((
-            attn_norm,
-            attn,
+            maybe_cross_attn_mhc,
             cross_attn_norm,
             cross_attn,
+            maybe_attn_mhc,
+            attn_norm,
+            attn,
+            maybe_ff_mhc,
             ff_norm,
             ff
         ), cached_video_kv) in zip(self.layers, prev_cached_video_hiddens_kv):
 
             # cross attention
 
-            residual = tokens
+            tokens, add_residual = maybe_cross_attn_mhc(tokens)
 
             tokens, gate = cross_attn_norm(tokens, time_cond)
 
             cross_attn_out, video_kv = cross_attn(tokens, context = video_hiddens, context_mask = context_mask, kv = cached_video_kv, return_kv = True)
 
-            tokens = residual + cross_attn_out * gate
+            tokens = add_residual(cross_attn_out * gate)
 
             if return_cache:
                 next_cached_video_hiddens_kv.append(video_kv)
 
             # self attention
 
-            residual = tokens
+            tokens, add_residual = maybe_attn_mhc(tokens)
 
             tokens, gate = attn_norm(tokens, time_cond)
 
-            tokens = residual + attn(tokens) * gate
+            tokens = add_residual(attn(tokens) * gate)
 
             # prepare feedforward
 
-            residual = tokens
+            tokens, add_residual = maybe_ff_mhc(tokens)
 
             tokens, gate = ff_norm(tokens, time_cond)
 
@@ -528,7 +552,11 @@ class MimicVideo(Module):
 
             # feedforward
 
-            tokens = residual + ff(tokens) * gate
+            tokens = add_residual(ff(tokens) * gate)
+
+        # maybe reduce streams
+
+        tokens = self.reduce_stream(tokens)
 
         # remove joint token
 
