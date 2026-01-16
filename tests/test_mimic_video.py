@@ -4,15 +4,17 @@ param = pytest.mark.parametrize
 import torch
 
 @param('num_residual_streams', (1, 4))
+@param('train_time_rtc', (False, True))
 def test_mimic_video(
-    num_residual_streams
+    num_residual_streams,
+    train_time_rtc
 ):
     from mimic_video.mimic_video import MimicVideo
 
     video_hiddens = torch.randn(2, 64, 77)
     video_mask = torch.randint(0, 2, (2, 64)).bool()
 
-    mimic_video = MimicVideo(512, dim_video_hidden = 77, num_residual_streams = num_residual_streams)
+    mimic_video = MimicVideo(512, dim_video_hidden = 77, num_residual_streams = num_residual_streams, train_time_rtc = train_time_rtc, train_time_rtc_max_delay = 4)
 
     actions = torch.randn(2, 32, 20)
 

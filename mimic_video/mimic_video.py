@@ -8,7 +8,7 @@ from torch.nn import Module, ModuleList, Linear, GRU
 import torch.nn.functional as F
 
 import einx
-from einops import einsum, rearrange, repeat
+from einops import einsum, rearrange, repeat, reduce
 from einops.layers.torch import Rearrange
 
 from x_mlps_pytorch import create_mlp
@@ -16,6 +16,7 @@ from x_mlps_pytorch import create_mlp
 from tqdm import tqdm
 
 from torch_einops_utils import (
+    lens_to_mask,
     pad_left_ndim,
     align_dims_left,
     pad_at_dim,
@@ -104,7 +105,7 @@ class AdaptiveRMSNorm(Module):
         self.eps = eps
 
         self.to_modulation = LinearNoBias(dim_time_cond, dim * 3)
-        self.split_modulation = Rearrange('b (three d) -> three b 1 d', three = 3)
+        self.split_modulation = Rearrange('... (three d) -> three ... d', three = 3)
 
         nn.init.zeros_(self.to_modulation.weight)
 
@@ -115,9 +116,8 @@ class AdaptiveRMSNorm(Module):
         tokens,
         time_cond
     ):
-
-        if time_cond.ndim == 1:
-            time_cond = pad_left_ndim(time_cond, 1)
+        if time_cond.ndim == 2:
+            time_cond = rearrange(time_cond, 'b d -> b 1 d')
 
         modulations = self.to_modulation(time_cond)
 
@@ -252,6 +252,8 @@ class MimicVideo(Module):
         ada_ln_zero_bias = -5.,
         dim_time_cond = None,
         sample_time_fn = None,
+        train_time_rtc = False,
+        train_time_rtc_max_delay = None,
         num_residual_streams = 1,
         mhc_kwargs: dict = dict()
     ):
@@ -355,6 +357,17 @@ class MimicVideo(Module):
             Linear(dim, dim_action, bias = False)
         )
 
+        # inference related
+
+        # train time RTC related - https://arxiv.org/abs/2512.05964
+
+        self.train_time_rtc = train_time_rtc
+
+        assert not train_time_rtc or exists(train_time_rtc_max_delay)
+        self.train_time_rtc_max_delay = train_time_rtc_max_delay
+
+        # aux loss and device
+
         self.register_buffer('zero', tensor(0.), persistent = False)
 
     @property
@@ -408,6 +421,7 @@ class MimicVideo(Module):
         assert actions.shape[-2:] == self.action_shape
 
         batch, device = actions.shape[0], actions.device
+        orig_actions = actions
 
         is_training = not exists(time) and not return_flow
 
@@ -449,8 +463,21 @@ class MimicVideo(Module):
             actions, left_aligned_time = align_dims_left((actions, time))
 
             noised = noise.lerp(actions, left_aligned_time)
+
         else:
             noised = actions
+
+        # maybe train time rtc
+
+        action_prefix_mask = None
+
+        if is_training and self.train_time_rtc:
+
+            rand_prefix_len = torch.randint(0, self.train_time_rtc_max_delay, (batch,), device = device)
+            action_prefix_mask = lens_to_mask(rand_prefix_len, self.action_chunk_len)
+
+            actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
+            time = einx.where('b na, , b', action_prefix_mask, 1., time)
 
         if time.ndim == 0:
             time = repeat(time, '-> b', b = batch)
@@ -465,7 +492,13 @@ class MimicVideo(Module):
         if time_video_denoise.shape[0] != batch:
             time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
 
+        if time.ndim == 2:
+            time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = time.shape[-1])
+
         times = stack((time, time_video_denoise), dim = -1)
+
+        if times.ndim == 3:
+            times = pad_at_dim(times, (1, 0), dim = 1, value = 1.) # handle joint state token on the action
 
         # fourier embed and mlp to time condition
 
@@ -573,7 +606,13 @@ class MimicVideo(Module):
         else:
             # mse flow loss
 
-            flow_loss = F.mse_loss(pred_flow, flow)
+            flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
+            flow_loss = reduce(flow_loss, '... d -> ...', 'mean')
+
+            if exists(action_prefix_mask):
+                flow_loss = flow_loss[~action_prefix_mask].mean()
+            else:
+                flow_loss = flow_loss.mean()
 
             out = flow_loss
 
