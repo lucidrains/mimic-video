@@ -21,6 +21,7 @@ from torch_einops_utils import (
     align_dims_left,
     pad_at_dim,
     pack_with_inverse,
+    masked_mean
 )
 
 from hyper_connections.mHCv2 import get_init_and_expand_reduce_stream_functions
@@ -469,7 +470,7 @@ class MimicVideo(Module):
 
         # maybe train time rtc
 
-        action_prefix_mask = None
+        action_loss_mask = None
 
         if is_training and self.train_time_rtc:
 
@@ -478,6 +479,8 @@ class MimicVideo(Module):
 
             actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
             time = einx.where('b na, , b', action_prefix_mask, 1., time)
+
+            action_loss_mask = ~action_prefix_mask
 
         if time.ndim == 0:
             time = repeat(time, '-> b', b = batch)
@@ -607,14 +610,8 @@ class MimicVideo(Module):
             # mse flow loss
 
             flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
-            flow_loss = reduce(flow_loss, '... d -> ...', 'mean')
 
-            if exists(action_prefix_mask):
-                flow_loss = flow_loss[~action_prefix_mask].mean()
-            else:
-                flow_loss = flow_loss.mean()
-
-            out = flow_loss
+            out = masked_mean(flow_loss, action_loss_mask)
 
         if not return_cache:
             return out
