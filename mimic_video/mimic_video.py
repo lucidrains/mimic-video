@@ -442,6 +442,13 @@ class MimicVideo(Module):
 
         inpainting = exists(prefix_action_chunk)
 
+        # times
+
+        times = torch.linspace(0., 1., steps + 1, device = self.device)[:-1]
+        delta = 1. / steps
+
+        # inpaint
+
         if inpainting:
             prefix_len = prefix_action_chunk.shape[1]
             assert prefix_len < self.action_chunk_len
@@ -451,14 +458,12 @@ class MimicVideo(Module):
             if exists(self.action_normalizer):
                 maybe_normed_prefix = self.action_normalizer.normalize(prefix_action_chunk)
 
+            times = repeat(times, 'steps -> steps b n', b = batch_size, n = self.action_chunk_len).clone()
+            times[..., :prefix_len] = 1.
+
         # noise
 
         noise = torch.randn((batch_size, *self.action_shape), device = self.device)
-
-        # times
-
-        times = torch.linspace(0., 1., steps + 1, device = self.device)[:-1]
-        delta = 1. / steps
 
         # denoised action starts as noise
 
