@@ -234,6 +234,8 @@ class Attention(Module):
 
         out = einsum(attn, values, 'b g h i j, b h j d -> b g h i d')
 
+        # https://openreview.net/forum?id=1b7whO4SfY - should become standard practice
+
         out = out * self.attn_gate_value(tokens).sigmoid()
 
         out = self.merge_heads(out)
@@ -294,7 +296,10 @@ class MimicVideo(Module):
         train_time_rtc_max_delay = None,
         num_residual_streams = 1,
         mhc_kwargs: dict = dict(),
-        action_mean_std: Tensor | None = None
+        action_mean_std: Tensor | None = None,
+        joint_mean_std: Tensor | None = None,
+        num_task_ids = 0,
+        num_advantage_ids = 0
     ):
         super().__init__()
 
@@ -326,6 +331,12 @@ class MimicVideo(Module):
         assert exists(dim_video_hidden), f'`dim_video_hidden` must be set or `video_predict_wrapper` passed in with `dim_latent`'
 
         self.dim_video_hidden = dim_video_hidden
+
+        self.joint_normalizer = None
+
+        if exists(joint_mean_std):
+            assert joint_mean_std == (2, dim_joint_state)
+            self.joint_normalizer = Normalizer(*joint_mean_std)
 
         # flow related
 
@@ -414,6 +425,12 @@ class MimicVideo(Module):
         assert not train_time_rtc or exists(train_time_rtc_max_delay)
         self.train_time_rtc_max_delay = train_time_rtc_max_delay
 
+        # condition related
+
+        self.task_embed = nn.Embedding(num_task_ids, dim) if num_task_ids > 0 else None
+
+        self.advantage_embed = nn.Embedding(num_advantage_ids, dim) if num_advantage_ids > 0 else None
+
         # aux loss and device
 
         self.register_buffer('zero', tensor(0.), persistent = False)
@@ -497,14 +514,16 @@ class MimicVideo(Module):
     def forward(
         self,
         *,
-        actions,
-        joint_state,
-        video = None,
-        video_hiddens = None, # they use layer 19 of cosmos predict, at first denoising step. that's all
+        actions,                    # (b na d)
+        joint_state,                # (b)
+        task_ids = None,            # (b)
+        advantage_ids = None,       # (b)
+        video = None,               # (b c t h w)
+        video_hiddens = None,       # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
-        time = None,
-        time_video_denoise = 0., # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
-        prompts = None,
+        time = None,                # () | (b) | (b n)
+        time_video_denoise = 0.,    # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
+        prompts: list[str] | None = None,
         prompt_token_ids = None,
         detach_video_hiddens = False,
         no_grad_video_model_forward = False,
@@ -602,8 +621,53 @@ class MimicVideo(Module):
 
         times = stack((time, time_video_denoise), dim = -1)
 
+        # embed
+
+        tokens = self.to_action_tokens(noised)
+
+        # setup empty tokens for various packed condition tokens
+
+        empty_token = tokens[:, 0:0]
+
+        # one layer of rnn for actions
+
+        rnn_out, _, = self.rnn(tokens)
+        tokens = rnn_out + tokens
+
+        #  mask joint state token for proprioception masking training
+
+        if exists(self.joint_normalizer):
+            joint_state = self.joint_normalizer.normalize(joint_state)
+
+        joint_state_token = self.to_joint_state_token(joint_state)
+
+        if self.training and self.has_proprio_masking:
+            mask = torch.rand((batch,), device = device) < self.proprio_mask_prob
+
+            joint_state_token = einx.where('b, d, b d', mask, self.proprio_mask_token, joint_state_token)
+
+        # setup task
+
+        task_embed = empty_token
+
+        if exists(task_ids):
+            assert exists(self.task_embed)
+            task_embed = self.task_embed(task_ids)
+
+        # setup maybe advantage
+
+        advantage_embed = empty_token
+
+        if exists(advantage_ids):
+            assert exists(self.advantage_embed)
+            advantage_embed = self.advantage_embed(advantage_ids)
+
+        # determine time - need to handle the sequence dimension given train time RTC and various conditioning tokens
+
         if times.ndim == 3:
-            times = pad_at_dim(times, (1, 0), dim = 1, value = 1.) # handle joint state token on the action
+            joint_task_advantage_times = 1 + int(exists(advantage_ids)) + int(exists(task_ids))
+
+            times = pad_at_dim(times, (joint_task_advantage_times, 0), dim = 1, value = 1.) # handle joint state token on the action
 
         # fourier embed and mlp to time condition
 
@@ -613,27 +677,9 @@ class MimicVideo(Module):
 
         time_cond = self.to_time_cond(fourier_embed)
 
-        # embed
+        # pack with action tokens for attention tower
 
-        tokens = self.to_action_tokens(noised)
-
-        # one layer of rnn for actions
-
-        rnn_out, _, = self.rnn(tokens)
-        tokens = rnn_out + tokens
-
-        #  mask joint state token for proprioception masking training
-
-        joint_state_token = self.to_joint_state_token(joint_state)
-
-        if self.training and self.has_proprio_masking:
-            mask = torch.rand((batch,), device = device) < self.proprio_mask_prob
-
-            joint_state_token = einx.where('b, d, b d', mask, self.proprio_mask_token, joint_state_token)
-
-        # pack joint with action tokens
-
-        tokens, inverse_pack = pack_with_inverse((joint_state_token, tokens), 'b * d')
+        tokens, inverse_pack = pack_with_inverse((advantage_embed, task_embed, joint_state_token, tokens), 'b * d')
 
         # maybe expand streams
 
@@ -682,11 +728,11 @@ class MimicVideo(Module):
 
             # shift along time for action tokens for cheap relative positioning, which is better than messing with rope with such short action chunks
 
-            joint_state_token, tokens = inverse_pack(tokens)
+            *non_action_tokens, tokens = inverse_pack(tokens)
 
             tokens = shift_feature_dim(tokens)
 
-            tokens, _ = pack_with_inverse((joint_state_token, tokens), 'b * d')
+            tokens, _ = pack_with_inverse((*non_action_tokens, tokens), 'b * d')
 
             # feedforward
 
@@ -698,7 +744,7 @@ class MimicVideo(Module):
 
         # remove joint token
 
-        _, tokens = inverse_pack(tokens)
+        *_, tokens = inverse_pack(tokens)
 
         # prediction
 
