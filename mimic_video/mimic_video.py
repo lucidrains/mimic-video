@@ -306,6 +306,7 @@ class MimicVideo(Module):
         joint_mean_std: Tensor | None = None,
         num_task_ids = 0,
         num_advantage_ids = 0,
+        advantage_cfg_dropout = 0.25,
         extracted_video_layer_indices: list[int] | None = None
     ):
         super().__init__()
@@ -436,7 +437,11 @@ class MimicVideo(Module):
 
         self.task_embed = nn.Embedding(num_task_ids, dim) if num_task_ids > 0 else None
 
-        self.advantage_embed = nn.Embedding(num_advantage_ids, dim) if num_advantage_ids > 0 else None
+        self.advantage_embed = nn.Embedding(num_advantage_ids + 1, dim) if num_advantage_ids > 0 else None
+
+        assert advantage_cfg_dropout > 0.
+
+        self.advantage_cfg_dropout = advantage_cfg_dropout
 
         # allow for researchers to explore beyond just one layer of pretrained
         # we should also open up research into multiple pretrained models eventually
@@ -672,6 +677,12 @@ class MimicVideo(Module):
 
         if exists(advantage_ids):
             assert exists(self.advantage_embed)
+
+            advantage_ids = advantage_ids + 1 # 0 for dropout
+            cfg_dropout = torch.rand_like(advantage_ids.float()) < self.advantage_cfg_dropout
+
+            advantage_ids = einx.where('b, , b', cfg_dropout, 0, advantage_ids)
+
             advantage_embed = self.advantage_embed(advantage_ids)
 
         # determine time - need to handle the sequence dimension given train time RTC and various conditioning tokens
