@@ -6,10 +6,12 @@ import torch
 @param('num_residual_streams', (1, 4))
 @param('train_time_rtc', (False, True))
 @param('action_stats_given', (False, True))
+@param('condition_tokens_given', (False, True))
 def test_mimic_video(
     num_residual_streams,
     train_time_rtc,
-    action_stats_given
+    action_stats_given,
+    condition_tokens_given
 ):
     from mimic_video.mimic_video import MimicVideo
 
@@ -20,13 +22,27 @@ def test_mimic_video(
     if action_stats_given:
         action_mean_std = torch.ones((2, 20))
 
-    mimic_video = MimicVideo(512, action_mean_std = action_mean_std, dim_video_hidden = 77, num_residual_streams = num_residual_streams, train_time_rtc = train_time_rtc, train_time_rtc_max_delay = 4)
+    advantage_ids = task_ids = None
+    if condition_tokens_given:
+        advantage_ids = torch.randint(0, 2, (2,))
+        task_ids = torch.randint(0, 3, (2,))
+
+    mimic_video = MimicVideo(
+        512,
+        action_mean_std = action_mean_std,
+        dim_video_hidden = 77,
+        num_residual_streams = num_residual_streams,
+        train_time_rtc = train_time_rtc,
+        train_time_rtc_max_delay = 4,
+        num_advantage_ids = 2,
+        num_task_ids = 3
+    )
 
     actions = torch.randn(2, 32, 20)
 
     joint_state = torch.randn(2, 32)
 
-    forward_kwargs = dict(video_hiddens = video_hiddens, context_mask = video_mask, joint_state = joint_state)
+    forward_kwargs = dict(video_hiddens = video_hiddens, context_mask = video_mask, joint_state = joint_state, advantage_ids = advantage_ids, task_ids = task_ids)
 
     loss = mimic_video(actions = actions, **forward_kwargs)
 
