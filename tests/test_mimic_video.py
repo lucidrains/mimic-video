@@ -111,3 +111,84 @@ def test_e2e(
     )
 
     assert pred_actions.shape == (1, 32, 20)
+
+def test_lora_e2e():
+    import os
+    import shutil
+    from torch.utils.data import Dataset
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.cosmos_predict import CosmosPredictWrapper
+
+    class DummyRobotDataset(Dataset):
+        def __len__(self): return 1
+        def __getitem__(self, _):
+            return torch.rand(9, 3, 32, 32), torch.randint(0, 1000, (32,))
+
+    save_path = './cosmos-lora-test'
+    if os.path.exists(save_path):
+        shutil.rmtree(save_path)
+
+    # 1. setup video wrapper and finetune to get a lora
+
+    video_wrapper = CosmosPredictWrapper(
+        extract_layers = [1, 2],
+        random_weights = True,
+        tiny = True
+    )
+
+    video_wrapper.finetune(
+        DummyRobotDataset(),
+        save_path = save_path,
+        epochs = 1
+    )
+
+    # 2. instantiate new wrapper with the trained lora_path
+
+    lora_wrapper = CosmosPredictWrapper(
+        extract_layers = [1, 2],
+        random_weights = True,
+        tiny = True,
+        lora_path = save_path
+    )
+
+    # 3. mimic video integration
+
+    model = MimicVideo(
+        dim = 512,
+        video_predict_wrapper = lora_wrapper,
+        depth = 3,
+        extracted_video_layer_indices = [0, 1, 1]
+    )
+
+    # 4. dummy states and actions
+
+    video = torch.rand(1, 9, 3, 32, 32)
+    joint_state = torch.randn(1, 32)
+    actions = torch.randn(1, 32, 20)
+
+    # 5. training forward pass
+
+    loss = model(
+        prompts = 'a task',
+        video = video,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+    assert loss.numel() == 1
+
+    # 6. inference sampling
+
+    sampled_actions = model.sample(
+        prompts = 'the final task',
+        video = video,
+        joint_state = joint_state
+    )
+
+    assert sampled_actions.shape == (1, 32, 20)
+
+    # cleanup
+
+    if os.path.exists(save_path):
+        shutil.rmtree(save_path)

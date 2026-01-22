@@ -626,7 +626,7 @@ class MimicVideo(Module):
 
         # handle the video denoising times
 
-        time_video_denoise = cast_tensor(time_video_denoise)
+        time_video_denoise = cast_tensor(time_video_denoise, device = device)
 
         if time_video_denoise.ndim == 0:
             time_video_denoise = rearrange(time_video_denoise, '-> 1')

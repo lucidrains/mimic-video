@@ -4,8 +4,11 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
-from torch.nn import Module
+import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.nn import Module
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from einops import rearrange
 
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
@@ -18,11 +21,12 @@ from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 def exists(v):
     return v is not None
 
-def identity(t):
-    return t
-
 def default(v, d):
     return v if exists(v) else d
+
+def logit_normal_sample(size, mu = 0.0, sigma = 1.0, device = 'cpu'):
+    z = torch.randn(size, device = device) * sigma + mu
+    return torch.sigmoid(z)
 
 # constants
 
@@ -94,14 +98,17 @@ REAL_T5_CONFIG = dict(
     num_heads = 16,
 )
 
+DEFAULT_LORA_CONFIG = dict(
+    r = 8,
+    lora_alpha = 16,
+    target_modules = ["to_q", "to_k", "to_v", "to_out.0"],
+    lora_dropout = 0.05,
+    bias = "none",
+)
+
 # main class
 
 class CosmosPredictWrapper(Module):
-    """
-    Wraps Cosmos VAE + DiT for extracting hidden states from a video.
-    Supports proper EDM Euler denoising steps.
-    """
-    
     def __init__(
         self,
         model_name: str = 'nvidia/Cosmos-1.0-Diffusion-7B-Video2World',
@@ -109,31 +116,28 @@ class CosmosPredictWrapper(Module):
         random_weights: bool = False,
         tiny: bool = False,
         normalize = lambda t: (t - 0.5) * 2.0,
-        extract_layer: int | None = None
+        extract_layer: int | None = None,
+        lora_path: str | None = None
     ):
         super().__init__()
-        extract_layers = default(extract_layers, extract_layer)
-        extract_layers = default(extract_layers, 19)
-
+        extract_layers = default(default(extract_layers, extract_layer), 19)
         self.extract_layers = [extract_layers] if isinstance(extract_layers, int) else extract_layers
         self.return_list = isinstance(extract_layers, list)
 
-        self.hook_handles: list = []
-        self.cached_hidden_states: list[Tensor] = []
+        self.hook_handles = []
+        self.cached_hidden_states = []
         
         if random_weights:
             self._init_random_weights(tiny = tiny)
         else:
             self._init_pretrained(model_name)
         
-        # Initialize scheduler
         self.scheduler = EDMEulerScheduler()
-        
-        # store hidden dim for consumers
         self.dim_latent = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
-
-        # maybe normalize
         self.normalize = normalize
+
+        if exists(lora_path):
+            self.load_lora(lora_path)
 
         self._register_hook()
 
@@ -142,62 +146,44 @@ class CosmosPredictWrapper(Module):
         return next(self.parameters()).device
 
     def _init_pretrained(self, model_name: str):
-        """Load pretrained weights from HuggingFace"""
         from diffusers import CosmosVideoToWorldPipeline
-        
         pipeline = CosmosVideoToWorldPipeline.from_pretrained(model_name)
-        
-        # Extract components we need
-        self.vae = pipeline.vae
-        self.transformer = pipeline.transformer
-        self.text_encoder = pipeline.text_encoder
-        self.tokenizer = pipeline.tokenizer
-
-        # Clean up pipeline
+        self.vae, self.transformer, self.text_encoder, self.tokenizer = pipeline.vae, pipeline.transformer, pipeline.text_encoder, pipeline.tokenizer
+        self.vae_temporal_compression_ratio = self.vae.config.temporal_compression_ratio
+        self.vae_spatial_compression_ratio = self.vae.config.spatial_compression_ratio
+        self.vae_latent_channels = self.vae.config.latent_channels
         del pipeline
 
     def _init_random_weights(self, tiny: bool = False):
-        """Initialize with random weights for testing"""
-        
-        transformer_config = TINY_TRANSFORMER_CONFIG if tiny else REAL_TRANSFORMER_CONFIG
-        vae_config = TINY_VAE_CONFIG if tiny else REAL_VAE_CONFIG
-        t5_config_dict = TINY_T5_CONFIG if tiny else REAL_T5_CONFIG
+        config_t = TINY_TRANSFORMER_CONFIG if tiny else REAL_TRANSFORMER_CONFIG
+        config_v = TINY_VAE_CONFIG if tiny else REAL_VAE_CONFIG
+        config_5 = TINY_T5_CONFIG if tiny else REAL_T5_CONFIG
 
-        num_layers = max(2, *[layer + 1 for layer in self.extract_layers])
-        if not tiny:
-            num_layers = max(28, num_layers)
+        num_layers = max(28 if not tiny else 2, *[layer + 1 for layer in self.extract_layers])
         
-        self.transformer = CosmosTransformer3DModel(
-            num_layers = num_layers,
-            **transformer_config
-        )
-        
-        self.vae = AutoencoderKLCosmos(**vae_config)
-        
-        t5_config = T5Config(**t5_config_dict)
-        self.text_encoder = T5EncoderModel(t5_config)
+        self.transformer = CosmosTransformer3DModel(num_layers = num_layers, **config_t)
+        self.vae = AutoencoderKLCosmos(**config_v)
+        self.text_encoder = T5EncoderModel(T5Config(**config_5))
         self.tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
+        
+        self.vae_temporal_compression_ratio = config_v['temporal_compression_ratio']
+        self.vae_spatial_compression_ratio = config_v['spatial_compression_ratio']
+        self.vae_latent_channels = config_v['latent_channels']
 
     def __del__(self):
-        if not hasattr(self, 'hook_handles'):
-            return
-
-        for handle in self.hook_handles:
-            handle.remove()
+        for handle in getattr(self, 'hook_handles', []): handle.remove()
 
     def _register_hook(self):
-        assert hasattr(self.transformer, 'transformer_blocks'), 'transformer must have transformer_blocks'
-        
         for layer_index in self.extract_layers:
-            assert len(self.transformer.transformer_blocks) > layer_index, f'layer {layer_index} out of bounds'
+            target = self.transformer.transformer_blocks[layer_index]
+            self.hook_handles.append(target.register_forward_hook(lambda m, i, o: self.cached_hidden_states.append(o.detach().cpu())))
 
-            target_layer = self.transformer.transformer_blocks[layer_index]
-
-            def hook_fn(module, inp, out):
-                self.cached_hidden_states.append(out.detach().cpu())
-
-            handle = target_layer.register_forward_hook(hook_fn)
-            self.hook_handles.append(handle)
+    def load_lora(self, lora_path: str):
+        from peft import PeftModel
+        if isinstance(self.transformer, PeftModel):
+            self.transformer.load_adapter(lora_path, adapter_name = "default")
+        else:
+            self.transformer = PeftModel.from_pretrained(self.transformer, lora_path)
 
     def forward(
         self,
@@ -205,81 +191,102 @@ class CosmosPredictWrapper(Module):
         prompts: str | list[str] | None = None,
         prompt_token_ids: Tensor | None = None,
         num_inference_steps: int = 1,
-    ) -> Tensor:
-        """
-        videos: (batch, frames, channels, height, width) in [0, 1]
-        num_inference_steps: number of denoising steps to run
-        returns: hidden states tensor from the specified transformer layer (from first step)
-        """
-        batch, t, c, h, w = videos.shape
-
-        assert exists(prompts) ^ exists(prompt_token_ids)
-
-        # Scale videos from [0, 1] to [-1, 1] for Cosmos VAE
-
+    ) -> Tensor | list[Tensor]:
+        batch = videos.shape[0]
         videos = self.normalize(videos)
 
-        if isinstance(prompts, str):
-            prompts = [prompts] * batch
+        if isinstance(prompts, str): prompts = [prompts] * batch
 
         self.cached_hidden_states.clear()
-        
-        # Move video to device and rearrange for VAE: (B, T, C, H, W) -> (B, C, T, H, W)
-        videos = rearrange(videos, 'b t c h w -> b c t h w')
+        videos = rearrange(videos, 'b t c h w -> b c t h w').to(self.device)
         
         with torch.inference_mode():
-            # 1. encode video to latents via VAE
-
             latents = self.vae.encode(videos).latent_dist.sample()
             
-            # 2. maybe encode text prompts
-
             if exists(prompt_token_ids):
-                text_inputs = dict(input_ids = prompt_token_ids)
+                text_inputs = dict(input_ids = prompt_token_ids.to(self.device))
             else:
-                text_inputs = self.tokenizer(
-                    prompts, 
-                    return_tensors = "pt",
-                    padding = True,
-                    truncation = True,
-                    max_length = 512
-                )
+                text_inputs = self.tokenizer(default(prompts, [""] * batch), return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(self.device)
 
-            encoder_hidden_states = self.text_encoder(**text_inputs).last_hidden_state
+            encoder_states = self.text_encoder(**text_inputs)
+            if hasattr(encoder_states, 'last_hidden_state'):
+                encoder_states = encoder_states.last_hidden_state
             
-            # 3. Setup scheduler timesteps
             self.scheduler.set_timesteps(num_inference_steps, device = self.device)
             timesteps = self.scheduler.timesteps
             
-            # 4. Add noise to latents (start from pure noise scaled by initial sigma)
-            noise = torch.randn_like(latents)
-            latents = latents + noise * self.scheduler.init_noise_sigma
+            latents = latents + torch.randn_like(latents) * self.scheduler.init_noise_sigma
             
-            # 5. Denoising loop
-            for i, timestep in enumerate(timesteps):
-                # Scale model input
-                latent_model_input = self.scheduler.scale_model_input(latents, timestep)
-                
-                # Predict noise residual
-                noise_pred = self.transformer(
-                    hidden_states = latent_model_input,
-                    encoder_hidden_states = encoder_hidden_states,
-                    timestep = timestep.expand(batch),
-                    return_dict = False
-                )[0]
-                
-                # Compute previous noisy sample
-                latents = self.scheduler.step(noise_pred, timestep, latents, return_dict = False)[0]
+            for ts in timesteps:
+                model_input = self.scheduler.scale_model_input(latents, ts)
+                pred = self.transformer(hidden_states = model_input, encoder_hidden_states = encoder_states, timestep = ts.expand(batch), return_dict = False)[0]
+                latents = self.scheduler.step(pred, ts, latents, return_dict = False)[0]
 
-        assert len(self.cached_hidden_states) >= len(self.extract_layers), 'hidden states not captured'
-        
-        # Return hidden states from the first denoising step
         hiddens = self.cached_hidden_states[:len(self.extract_layers)]
+        return hiddens if self.return_list else hiddens[0]
 
-        for hidden in hiddens:
-            assert hidden.shape[-1] == self.dim_latent, f'hidden dim mismatch: expected {self.dim_latent}, got {hidden.shape[-1]}'
+    def finetune(
+        self,
+        dataset,
+        save_path: str = "cosmos-lora-adapter",
+        batch_size: int = 1,
+        lr: float = 1e-4,
+        epochs: int = 1,
+        mu: float = 0.0,
+        sigma: float = 1.0,
+        lora_config = None,
+        accelerator = None,
+        unfreeze_transformer: bool = False
+    ):
+        from peft import LoraConfig, get_peft_model, PeftModel
+        from accelerate import Accelerator
 
-        if not self.return_list:
-            return hiddens[0]
+        if not exists(accelerator):
+            accelerator = Accelerator()
 
-        return hiddens
+        device = accelerator.device
+
+        if not isinstance(self.transformer, PeftModel):
+            lora_config = default(lora_config, DEFAULT_LORA_CONFIG)
+            if isinstance(lora_config, dict): lora_config = LoraConfig(**lora_config)
+            self.transformer = get_peft_model(self.transformer, lora_config)
+
+        self.transformer.train()
+        if unfreeze_transformer:
+            for p in self.transformer.parameters(): p.requires_grad = True
+
+        dataloader = DataLoader(dataset, batch_size = batch_size, shuffle = True)
+        optimizer = torch.optim.AdamW(self.transformer.parameters(), lr = lr)
+        
+        self.transformer, self.vae, self.text_encoder, optimizer, dataloader = accelerator.prepare(
+            self.transformer, self.vae, self.text_encoder, optimizer, dataloader
+        )
+
+        for epoch in range(epochs):
+            pbar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
+            for videos, texts in pbar:
+                batch = videos.shape[0]
+                videos = self.normalize(videos)
+                videos = rearrange(videos, 'b t c h w -> b c t h w').to(device)
+
+                with torch.no_grad():
+                    latents = self.vae.encode(videos).latent_dist.sample()
+                    if isinstance(texts, list) and isinstance(texts[0], str):
+                        text_inputs = self.tokenizer(texts, return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(device)
+                        encoder_states = self.text_encoder(**text_inputs).last_hidden_state
+                    else:
+                        encoder_states = self.text_encoder(texts.to(device)).last_hidden_state
+
+                ts = logit_normal_sample((batch,), mu = mu, sigma = sigma, device = device)
+                pred = self.transformer(hidden_states = latents, encoder_hidden_states = encoder_states, timestep = ts * 1000, return_dict = False)[0]
+
+                loss = F.mse_loss(pred, torch.zeros_like(pred))
+                accelerator.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad()
+                pbar.set_postfix(loss = loss.item())
+
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            accelerator.unwrap_model(self.transformer).save_pretrained(save_path)
+            print(f"saved to {save_path}")
