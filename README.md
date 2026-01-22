@@ -99,6 +99,18 @@ That's it
 ```
 
 ```bibtex
+@misc{li2025basicsletdenoisinggenerative,
+    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    author  = {Tianhong Li and Kaiming He},
+    year    = {2025},
+    eprint  = {2511.13720},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2511.13720}, 
+}
+```
+
+```bibtex
 @misc{black2025trainingtimeactionconditioningefficient,
     title   = {Training-Time Action Conditioning for Efficient Real-Time Chunking}, 
     author  = {Kevin Black and Allen Z. Ren and Michael Equi and Sergey Levine},

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from torch_einops_utils import (
     lens_to_mask,
-    pad_left_ndim,
+    pad_right_ndim_to,
     align_dims_left,
     pad_at_dim,
     pack_with_inverse,
@@ -304,10 +304,12 @@ class MimicVideo(Module):
         mhc_kwargs: dict = dict(),
         action_mean_std: Tensor | None = None,
         joint_mean_std: Tensor | None = None,
+        model_output_clean = True,  # https://arxiv.org/abs/2511.13720 - Kaiming He group paper
         num_task_ids = 0,
         num_advantage_ids = 0,
         advantage_cfg_dropout = 0.25,
-        extracted_video_layer_indices: list[int] | None = None
+        extracted_video_layer_indices: list[int] | None = None,
+        eps = 1e-5
     ):
         super().__init__()
 
@@ -419,7 +421,7 @@ class MimicVideo(Module):
 
         # predictions
 
-        self.to_pred_action_flow = nn.Sequential(
+        self.to_pred = nn.Sequential(
             nn.RMSNorm(dim),
             Linear(dim, dim_action, bias = False)
         )
@@ -448,6 +450,11 @@ class MimicVideo(Module):
 
         self.extracted_video_layer_indices = default(extracted_video_layer_indices, (0,) * depth)
         assert len(self.extracted_video_layer_indices) == depth
+
+        # whether output to action transformer tower is flow or x0
+
+        self.model_output_clean = model_output_clean
+        self.eps = eps
 
         # aux loss and device
 
@@ -606,6 +613,13 @@ class MimicVideo(Module):
 
         else:
             noised = actions
+
+        # save the action time condition
+
+        action_time = time
+
+        if action_time.ndim == 0:
+            action_time = repeat(action_time, ' -> b ', b = batch)
 
         # maybe train time rtc
 
@@ -781,7 +795,16 @@ class MimicVideo(Module):
 
         # prediction
 
-        pred_flow = self.to_pred_action_flow(tokens)
+        pred = self.to_pred(tokens)
+
+        # convert to flow if outputting in x0 space
+
+        if self.model_output_clean:
+            pred_flow = (pred - actions) / pad_right_ndim_to(1. - action_time, pred.ndim).clamp_min(self.eps)
+        else:
+            pred_flow = pred
+
+        # handle maybe loss or returning flow for inference
 
         if not is_training:
             # flow
