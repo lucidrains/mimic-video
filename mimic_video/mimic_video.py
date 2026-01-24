@@ -568,6 +568,16 @@ class MimicVideo(Module):
 
         is_training = not exists(time) and not return_flow
 
+        # handle the video denoising times
+
+        time_video_denoise = cast_tensor(time_video_denoise, device = device)
+
+        if time_video_denoise.ndim == 0:
+            time_video_denoise = rearrange(time_video_denoise, '-> 1')
+
+        if time_video_denoise.shape[0] != batch:
+            time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
+
         if not exists(cache):
             # handle maybe extraction of video hiddens
             # only if cache is not given
@@ -578,8 +588,8 @@ class MimicVideo(Module):
                 assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
                 video_forward_wrap = eval_no_grad if no_grad_video_model_forward else identity
-
-                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, prompts = prompts, prompt_token_ids = prompt_token_ids)
+        
+                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, prompts = prompts, prompt_token_ids = prompt_token_ids, timestep = time_video_denoise)
 
                 video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 
@@ -637,16 +647,6 @@ class MimicVideo(Module):
 
         if time.ndim == 0:
             time = repeat(time, '-> b', b = batch)
-
-        # handle the video denoising times
-
-        time_video_denoise = cast_tensor(time_video_denoise, device = device)
-
-        if time_video_denoise.ndim == 0:
-            time_video_denoise = rearrange(time_video_denoise, '-> 1')
-
-        if time_video_denoise.shape[0] != batch:
-            time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
 
         if time.ndim == 2:
             time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = time.shape[-1])
