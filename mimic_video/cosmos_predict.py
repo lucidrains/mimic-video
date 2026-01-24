@@ -9,7 +9,8 @@ from torch import nn, Tensor
 from torch.nn import Module
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from einops import rearrange
+
+from einops import rearrange, repeat
 
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
 from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
@@ -193,54 +194,55 @@ class CosmosPredictWrapper(Module):
         num_inference_steps: int = 1,
         timestep: float | Tensor | None = None
     ) -> Tensor | list[Tensor]:
+
         batch = videos.shape[0]
         videos = self.normalize(videos)
 
         if isinstance(prompts, str): prompts = [prompts] * batch
 
         self.cached_hidden_states.clear()
-        
-        with torch.inference_mode():
 
-            videos = rearrange(videos, 'b t c h w -> b c t h w').to(self.device)
+        videos = rearrange(videos, 'b t c h w -> b c t h w').to(self.device)
 
-            if exists(prompt_token_ids):
-                text_inputs = dict(input_ids = prompt_token_ids.to(self.device))
-            else:
-                text_inputs = self.tokenizer(default(prompts, [""] * batch), return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(self.device)
+        if exists(prompt_token_ids):
+            text_inputs = dict(input_ids = prompt_token_ids.to(self.device))
+        else:
+            text_inputs = self.tokenizer(default(prompts, [""] * batch), return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(self.device)
 
-            encoder_states = self.text_encoder(**text_inputs)
-            if hasattr(encoder_states, 'last_hidden_state'):
-                encoder_states = encoder_states.last_hidden_state
+        encoder_states = self.text_encoder(**text_inputs)
+        if hasattr(encoder_states, 'last_hidden_state'):
+            encoder_states = encoder_states.last_hidden_state
 
-            latents = self.vae.encode(videos).latent_dist.sample()
+        latents = self.vae.encode(videos).latent_dist.sample()
 
-            if exists(timestep):
-                timestep = timestep.to(self.device)
-                if timestep.ndim == 0:
-                    timestep = timestep.repeat(batch)
+        if exists(timestep):
+            timestep = timestep.to(self.device)
+            if timestep.ndim == 0:
+                timestep = timestep.repeat(batch)
 
-                noise = torch.randn_like(latents)
+            noise = torch.randn_like(latents)
+
+            frames = latents.shape[2]
+            padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = frames)
+
+            noisy_latents = torch.lerp(latents, noise, padded_timestep)
+
+            self.transformer(
+                hidden_states = noisy_latents,
+                encoder_hidden_states = encoder_states,
+                timestep = padded_timestep * 1000,
+                return_dict = False
+            )
+        else:
+            self.scheduler.set_timesteps(num_inference_steps, device = self.device)
+            timesteps = self.scheduler.timesteps
             
-                t_broadcast = timestep.view(batch, 1, 1, 1, 1)
-                noisy_latents = (1 - t_broadcast) * latents + t_broadcast * noise
-                with torch.no_grad():
-                    self.transformer(
-                        hidden_states = noisy_latents, 
-                        encoder_hidden_states = encoder_states, 
-                        timestep = timestep * 1000 , 
-                        return_dict = False
-                    )
-            else:        
-                    self.scheduler.set_timesteps(num_inference_steps, device = self.device)
-                    timesteps = self.scheduler.timesteps
-                    
-                    latents = latents + torch.randn_like(latents) * self.scheduler.init_noise_sigma
-                    
-                    for ts in timesteps:
-                        model_input = self.scheduler.scale_model_input(latents, ts)
-                        pred = self.transformer(hidden_states = model_input, encoder_hidden_states = encoder_states, timestep = ts.expand(batch), return_dict = False)[0]
-                        latents = self.scheduler.step(pred, ts, latents, return_dict = False)[0]
+            latents = latents + torch.randn_like(latents) * self.scheduler.init_noise_sigma
+            
+            for ts in timesteps:
+                model_input = self.scheduler.scale_model_input(latents, ts)
+                pred = self.transformer(hidden_states = model_input, encoder_hidden_states = encoder_states, timestep = ts.expand(batch), return_dict = False)[0]
+                latents = self.scheduler.step(pred, ts, latents, return_dict = False)[0]
 
         hiddens = self.cached_hidden_states[:len(self.extract_layers)]
         return hiddens if self.return_list else hiddens[0]
