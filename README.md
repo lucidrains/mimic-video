@@ -6,7 +6,7 @@ Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Mo
 
 ## Appreciation
 
-- [Pranoy](https://github.com/pranoyr) for submitting a pull request for proprioception masking
+- [Pranoy](https://github.com/pranoyr) for submitting a pull request for proprioception masking as well as fixing the time conditioning of the video model
 
 ## Install
 
