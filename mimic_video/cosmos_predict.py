@@ -5,7 +5,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import torch.nn.functional as F
-from torch import cat, nn, Tensor
+from torch import cat, nn, Tensor, is_tensor
 from torch.nn import Module
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -23,6 +23,9 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def cast_tensor(val, device = None):
+    return tensor(val, device = device) if not is_tensor(val) else val
 
 def logit_normal_sample(size, mu = 0.0, sigma = 1.0, device = 'cpu'):
     z = torch.randn(size, device = device) * sigma + mu
@@ -218,15 +221,23 @@ class CosmosPredictWrapper(Module):
 
         latents = self.vae.encode(videos).latent_dist.sample()
 
+        # handle the video denoising times
+
+        if exists(timestep):
+            timestep = cast_tensor(timestep, device = self.device)
+
+            if timestep.ndim == 0:
+                timestep = rearrange(timestep, '-> 1')
+
+            if timestep.shape[0] != batch:
+                timestep = repeat(timestep, '1 -> b', b = batch)
+
         # use the `predict_num_future_latents` to differentiate between training, where MimicVideo is exposed to varying times for video denoising
         # vs inference where the prefix is fixed at T = 1 and some future number of latents T = 0 done for one step
 
         is_inference = predict_num_future_latents > 0
 
         if not is_inference:
-            if not exists(timestep):
-                timestep = logit_normal_sample((batch,), self.video_time_sample_mu, self.video_time_sample_sigma, device = self.device)
-
             if timestep.ndim == 0:
                 timestep = repeat(timestep, '-> b', b = batch)
 

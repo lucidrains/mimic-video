@@ -54,6 +54,9 @@ def identity(t):
 def divisible_by(num, den):
     return (num % den) == 0
 
+def logit_normal_sample(mu, sigma, batch_size, device = None):
+    return torch.sigmoid(mu + sigma * torch.randn(batch_size, device = device))
+
 # wrappers
 
 def eval_no_grad(fn):
@@ -309,6 +312,8 @@ class MimicVideo(Module):
         num_advantage_ids = 0,
         advantage_cfg_dropout = 0.25,
         extracted_video_layer_indices: list[int] | None = None,
+        video_time_denoise_mu = 0.,
+        video_time_denoise_sigma = 1.,
         eps = 1e-5
     ):
         super().__init__()
@@ -460,6 +465,9 @@ class MimicVideo(Module):
 
         self.register_buffer('zero', tensor(0.), persistent = False)
 
+        self.video_time_denoise_mu = video_time_denoise_mu
+        self.video_time_denoise_sigma = video_time_denoise_sigma
+
     # only action parameters
 
     def action_parameters(self):
@@ -571,15 +579,17 @@ class MimicVideo(Module):
 
         is_training = not exists(time) and not return_flow
 
-        # handle the video denoising times
+        if not exists(time_video_denoise):
+            if is_training:
+                time_video_denoise = logit_normal_sample(self.video_time_denoise_mu, self.video_time_denoise_sigma, batch, device = self.device)
+            else:
+                time_video_denoise = cast_tensor(0., device = self.device)
 
-        time_video_denoise = cast_tensor(time_video_denoise, device = device)
+            if time_video_denoise.ndim == 0:
+                time_video_denoise = rearrange(time_video_denoise, '-> 1')
 
-        if time_video_denoise.ndim == 0:
-            time_video_denoise = rearrange(time_video_denoise, '-> 1')
-
-        if time_video_denoise.shape[0] != batch:
-            time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
+            if time_video_denoise.shape[0] != batch:
+                time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
 
         if not exists(cache):
             # handle maybe extraction of video hiddens
