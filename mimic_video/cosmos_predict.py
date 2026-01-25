@@ -5,7 +5,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import torch.nn.functional as F
-from torch import nn, Tensor
+from torch import cat, nn, Tensor
 from torch.nn import Module
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -14,7 +14,6 @@ from einops import rearrange, repeat
 
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
 from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
-from diffusers.schedulers.scheduling_edm_euler import EDMEulerScheduler
 from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 
 # helpers
@@ -132,8 +131,7 @@ class CosmosPredictWrapper(Module):
             self._init_random_weights(tiny = tiny)
         else:
             self._init_pretrained(model_name)
-        
-        self.scheduler = EDMEulerScheduler()
+
         self.dim_latent = self.transformer.config.num_attention_heads * self.transformer.config.attention_head_dim
         self.normalize = normalize
 
@@ -191,8 +189,8 @@ class CosmosPredictWrapper(Module):
         videos: Tensor,
         prompts: str | list[str] | None = None,
         prompt_token_ids: Tensor | None = None,
-        num_inference_steps: int = 1,
-        timestep: float | Tensor | None = None
+        timestep: float | Tensor | None = None,
+        predict_num_future_latents = 0 # number of future frames to predict at inference - presumably the given video will be fixed at T = 0, with the future predicted frames at T = 1
     ) -> Tensor | list[Tensor]:
 
         batch = videos.shape[0]
@@ -215,8 +213,14 @@ class CosmosPredictWrapper(Module):
 
         latents = self.vae.encode(videos).latent_dist.sample()
 
-        if exists(timestep):
+        # use the `predict_num_future_latents` to differentiate between training, where MimicVideo is exposed to varying times for video denoising
+        # vs inference where the prefix is fixed at T = 1 and some future number of latents T = 0 done for one step
+
+        is_inference = predict_num_future_latents > 0
+
+        if not is_inference:
             timestep = timestep.to(self.device)
+
             if timestep.ndim == 0:
                 timestep = timestep.repeat(batch)
 
@@ -233,18 +237,38 @@ class CosmosPredictWrapper(Module):
                 timestep = padded_timestep * 1000,
                 return_dict = False
             )
+
         else:
-            self.scheduler.set_timesteps(num_inference_steps, device = self.device)
-            timesteps = self.scheduler.timesteps
+            # conditioning on time=0 for prefix (clean), and time=999 for future (noise)
             
-            latents = latents + torch.randn_like(latents) * self.scheduler.init_noise_sigma
-            
-            for ts in timesteps:
-                model_input = self.scheduler.scale_model_input(latents, ts)
-                pred = self.transformer(hidden_states = model_input, encoder_hidden_states = encoder_states, timestep = ts.expand(batch), return_dict = False)[0]
-                latents = self.scheduler.step(pred, ts, latents, return_dict = False)[0]
+            num_prefix_frames = latents.shape[2]
+
+            # timesteps
+
+            total_frames = num_prefix_frames + predict_num_future_latents
+
+            timestep = torch.zeros((batch, 1, total_frames, 1, 1), device = self.device)
+            timestep[:, :, num_prefix_frames:] = 999.
+
+            # get the future latents
+
+            shape = list(latents.shape)
+            shape[2] = predict_num_future_latents
+            future_latents = torch.randn(shape, device = latents.device)
+
+            # concat clean prefix with noised future
+
+            model_input = cat((latents, future_latents), dim = 2)
+
+            self.transformer(
+                hidden_states = model_input,
+                encoder_hidden_states = encoder_states,
+                timestep = timestep,
+                return_dict = False
+            )
 
         hiddens = self.cached_hidden_states[:len(self.extract_layers)]
+
         return hiddens if self.return_list else hiddens[0]
 
     def finetune(

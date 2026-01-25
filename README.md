@@ -1,6 +1,6 @@
 <img src="./mimic-video.png" width="450px"></img>
 
-## Mimic Video (wip)
+## Mimic Video
 
 Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Models for Generalizable Robot Control Beyond VLAs
 
@@ -134,14 +134,14 @@ That's it
 }
 ```
 
-```
+```bibtex
 @misc{kim2026cosmospolicyfinetuningvideo,
-      title={Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning}, 
-      author={Moo Jin Kim and Yihuai Gao and Tsung-Yi Lin and Yen-Chen Lin and Yunhao Ge and Grace Lam and Percy Liang and Shuran Song and Ming-Yu Liu and Chelsea Finn and Jinwei Gu},
-      year={2026},
-      eprint={2601.16163},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2601.16163}, 
+    title   = {Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning}, 
+    author  = {Moo Jin Kim and Yihuai Gao and Tsung-Yi Lin and Yen-Chen Lin and Yunhao Ge and Grace Lam and Percy Liang and Shuran Song and Ming-Yu Liu and Chelsea Finn and Jinwei Gu},
+    year    = {2026},
+    eprint  = {2601.16163},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.AI},
+    url     = {https://arxiv.org/abs/2601.16163}, 
 }
 ```

@@ -477,8 +477,10 @@ class MimicVideo(Module):
         batch_size = 1,
         prefix_action_chunk = None,
         disable_progress_bar = False,
+        predict_num_future_latents = 1,
         **kwargs
     ):
+        assert predict_num_future_latents > 0
 
         self.eval()
 
@@ -520,7 +522,7 @@ class MimicVideo(Module):
             if inpainting:
                 denoised[:, :prefix_len] = maybe_normed_prefix
 
-            pred_flow, cache = self.forward(actions = denoised, time = time, cache = cache, return_cache = True, **kwargs)
+            pred_flow, cache = self.forward(actions = denoised, time = time, cache = cache, predict_num_future_latents = predict_num_future_latents, return_cache = True, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
@@ -549,6 +551,7 @@ class MimicVideo(Module):
         context_mask = None,
         time = None,                    # () | (b) | (b n)
         time_video_denoise = 0.,        # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
+        predict_num_future_latents = 0,
         prompts: list[str] | None = None,
         prompt_token_ids = None,
         detach_video_hiddens = False,
@@ -589,7 +592,13 @@ class MimicVideo(Module):
 
                 video_forward_wrap = eval_no_grad if no_grad_video_model_forward else identity
         
-                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, prompts = prompts, prompt_token_ids = prompt_token_ids, timestep = time_video_denoise)
+                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(
+                    video,
+                    prompts = prompts,
+                    prompt_token_ids = prompt_token_ids,
+                    timestep = time_video_denoise,
+                    predict_num_future_latents = predict_num_future_latents
+                )
 
                 video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 
