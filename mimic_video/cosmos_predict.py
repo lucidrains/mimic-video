@@ -16,6 +16,8 @@ from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3D
 from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
 from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 
+from torch_einops_utils import shape_with_replace
+
 # helpers
 
 def exists(v):
@@ -269,9 +271,9 @@ class CosmosPredictWrapper(Module):
 
             # get the future latents
 
-            shape = list(latents.shape)
-            shape[2] = predict_num_future_latents
-            future_latents = torch.randn(shape, device = latents.device)
+            pred_shape = shape_with_replace(latents, {2: predict_num_future_latents}) # same shape as latents, but with frame replaced with some custom hyperparameter
+
+            future_latents = torch.randn(pred_shape, device = latents.device)
 
             # concat clean prefix with noised future
 
