@@ -5,7 +5,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import torch.nn.functional as F
-from torch import cat, nn, Tensor, is_tensor
+from torch import cat, nn, Tensor, is_tensor, tensor
 from torch.nn import Module
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -79,7 +79,7 @@ REAL_TRANSFORMER_CONFIG = dict(
     patch_size = (1, 2, 2),
     max_size = (128, 240, 240),
     extra_pos_embed_type = "learnable",
-    concat_padding_mask = True,
+    concat_padding_mask = False,
 )
 
 REAL_VAE_CONFIG = dict(
@@ -364,4 +364,16 @@ class CosmosPredictWrapper(Module):
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             accelerator.unwrap_model(self.transformer).save_pretrained(save_path)
-            print(f"saved to {save_path}")
+
+# cosmos 2.5 wrapper
+
+class Cosmos2_5PredictWrapper(CosmosPredictWrapper):
+    def __init__(
+        self,
+        model_name: str = 'nvidia/Cosmos-Predict2.5-2B',
+        **kwargs
+    ):
+        super().__init__(
+            model_name = model_name,
+            **kwargs
+        )
