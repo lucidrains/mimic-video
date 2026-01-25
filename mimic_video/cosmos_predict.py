@@ -117,7 +117,9 @@ class CosmosPredictWrapper(Module):
         tiny: bool = False,
         normalize = lambda t: (t - 0.5) * 2.0,
         extract_layer: int | None = None,
-        lora_path: str | None = None
+        lora_path: str | None = None,
+        video_time_sample_mu: float = 0.,
+        video_time_sample_sigma: float = 1.
     ):
         super().__init__()
         extract_layers = default(default(extract_layers, extract_layer), 19)
@@ -137,6 +139,9 @@ class CosmosPredictWrapper(Module):
 
         if exists(lora_path):
             self.load_lora(lora_path)
+
+        self.video_time_sample_mu = video_time_sample_mu
+        self.video_time_sample_sigma = video_time_sample_sigma
 
         self._register_hook()
 
@@ -219,10 +224,11 @@ class CosmosPredictWrapper(Module):
         is_inference = predict_num_future_latents > 0
 
         if not is_inference:
-            timestep = timestep.to(self.device)
+            if not exists(timestep):
+                timestep = logit_normal_sample((batch,), self.video_time_sample_mu, self.video_time_sample_sigma, device = self.device)
 
             if timestep.ndim == 0:
-                timestep = timestep.repeat(batch)
+                timestep = repeat(timestep, '-> b', b = batch)
 
             noise = torch.randn_like(latents)
 
@@ -324,9 +330,21 @@ class CosmosPredictWrapper(Module):
                         encoder_states = self.text_encoder(texts.to(device)).last_hidden_state
 
                 ts = logit_normal_sample((batch,), mu = mu, sigma = sigma, device = device)
-                pred = self.transformer(hidden_states = latents, encoder_hidden_states = encoder_states, timestep = ts * 1000, return_dict = False)[0]
 
-                loss = F.mse_loss(pred, torch.zeros_like(pred))
+                # noise and flow matching logic
+
+                noise = torch.randn_like(latents)
+
+                frames = latents.shape[2]
+                padded_ts = repeat(ts, 'b -> b 1 f 1 1', f = frames)
+
+                noisy_latents = torch.lerp(latents, noise, padded_ts)
+
+                flow_target = noise - latents
+
+                pred = self.transformer(hidden_states = noisy_latents, encoder_hidden_states = encoder_states, timestep = ts * 1000, return_dict = False)[0]
+
+                loss = F.mse_loss(pred, flow_target)
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()

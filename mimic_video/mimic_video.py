@@ -550,7 +550,7 @@ class MimicVideo(Module):
         video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
         time = None,                    # () | (b) | (b n)
-        time_video_denoise = 0.,        # 0 is noise in the scheme i prefer - default to their optimal choice, but can be changed
+        time_video_denoise = None,      # override default logit normal sampling for video denoising time
         predict_num_future_latents = 0,
         prompts: list[str] | None = None,
         prompt_token_ids = None,
