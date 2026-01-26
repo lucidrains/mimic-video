@@ -11,12 +11,13 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from einops import rearrange, repeat
+import einx
 
 from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
 from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
 from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 
-from torch_einops_utils import shape_with_replace
+from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean
 
 # helpers
 
@@ -124,7 +125,9 @@ class CosmosPredictWrapper(Module):
         extract_layer: int | None = None,
         lora_path: str | None = None,
         video_time_sample_mu: float = 0.,
-        video_time_sample_sigma: float = 1.
+        video_time_sample_sigma: float = 1.,
+        train_fixed_video_prefix: bool = False,
+        train_fixed_video_prefix_max_delay: int | None = None
     ):
         super().__init__()
         extract_layers = default(default(extract_layers, extract_layer), 19)
@@ -147,6 +150,9 @@ class CosmosPredictWrapper(Module):
 
         self.video_time_sample_mu = video_time_sample_mu
         self.video_time_sample_sigma = video_time_sample_sigma
+
+        self.train_fixed_video_prefix = train_fixed_video_prefix
+        self.train_fixed_video_prefix_max_delay = train_fixed_video_prefix_max_delay
 
         self._register_hook()
 
@@ -240,6 +246,8 @@ class CosmosPredictWrapper(Module):
         is_inference = predict_num_future_latents > 0
 
         if not is_inference:
+            timestep = default(timestep, tensor(0., device = self.device))
+
             if timestep.ndim == 0:
                 timestep = repeat(timestep, '-> b', b = batch)
 
@@ -249,6 +257,17 @@ class CosmosPredictWrapper(Module):
             padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = frames)
 
             noisy_latents = torch.lerp(latents, noise, padded_timestep)
+
+            # train time fixed video prefixing logic - same as train time RTC from Black et al. https://arxiv.org/abs/2512.05964
+            # although it is similar (fixed video prefix), it isn't exactly "real time chunking" as in actions
+            # researchers are invited to test this
+
+            if not is_inference and self.training and self.train_fixed_video_prefix:
+                rand_prefix_len = torch.randint(0, self.train_fixed_video_prefix_max_delay, (batch,), device = self.device)
+                fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
+
+                fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
+                padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
 
             self.transformer(
                 hidden_states = noisy_latents,
@@ -301,7 +320,8 @@ class CosmosPredictWrapper(Module):
         sigma: float = 1.0,
         lora_config = None,
         accelerator = None,
-        unfreeze_transformer: bool = False
+        unfreeze_transformer: bool = False,
+        train_fixed_video_prefix_max_delay: int = 0
     ):
         from peft import LoraConfig, get_peft_model, PeftModel
         from accelerate import Accelerator
@@ -336,7 +356,7 @@ class CosmosPredictWrapper(Module):
 
                 with torch.no_grad():
                     latents = self.vae.encode(videos).latent_dist.sample()
-                    if isinstance(texts, list) and isinstance(texts[0], str):
+                    if isinstance(texts, (list, tuple)) and isinstance(texts[0], str):
                         text_inputs = self.tokenizer(texts, return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(device)
                         encoder_states = self.text_encoder(**text_inputs).last_hidden_state
                     else:
@@ -355,9 +375,31 @@ class CosmosPredictWrapper(Module):
 
                 flow_target = noise - latents
 
+                # handle train time fixed video prefixing - same as train time RTC from Black et al. https://arxiv.org/abs/2512.05964
+                # although it is similar (fixed video prefix), it isn't exactly "real time chunking" as in actions
+                # researchers are invited to test this
+
+                fixed_prefix_loss_mask = None
+
+                if train_fixed_video_prefix_max_delay > 0:
+                    rand_prefix_len = torch.randint(0, train_fixed_video_prefix_max_delay, (batch,), device = device)
+                    fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
+
+                    fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
+                    padded_ts = einx.where('b 1 f 1 1, , b 1 f 1 1', fixed_prefix_mask, 0., padded_ts)
+                    noisy_latents = torch.lerp(latents, noise, padded_ts)
+
+                    fixed_prefix_loss_mask = ~fixed_prefix_mask
+
                 pred = self.transformer(hidden_states = noisy_latents, encoder_hidden_states = encoder_states, timestep = ts * 1000, return_dict = False)[0]
 
-                loss = F.mse_loss(pred, flow_target)
+                loss = F.mse_loss(pred, flow_target, reduction = 'none')
+
+                if exists(fixed_prefix_loss_mask):
+                    fixed_prefix_loss_mask = fixed_prefix_loss_mask.broadcast_to(loss.shape)
+
+                loss = masked_mean(loss, fixed_prefix_loss_mask)
+
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()
