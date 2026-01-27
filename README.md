@@ -38,7 +38,7 @@ model = MimicVideo(512, video_wrapper)
 
 # states
 
-video = torch.rand(2, 3, 3, 32, 32)
+video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
 
 joint_state = torch.randn(2, 32)
 

@@ -58,10 +58,12 @@ def test_mimic_video(
 @param('num_residual_streams', (1, 4))
 @param('prev_action_chunk', (False, True))
 @param('cross_attend_multiple', (False, True))
+@param('num_video_viewpoints', (1, 2))
 def test_e2e(
     num_residual_streams,
     prev_action_chunk,
-    cross_attend_multiple
+    cross_attend_multiple,
+    num_video_viewpoints
 ):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
@@ -84,10 +86,12 @@ def test_e2e(
         video_wrapper,
         num_residual_streams = num_residual_streams,
         depth = 3,
-        extracted_video_layer_indices = extracted_video_layer_indices
+        extracted_video_layer_indices = extracted_video_layer_indices,
+        num_video_viewpoints = num_video_viewpoints
     )
 
-    video = torch.rand(1, 3, 3, 32, 32)
+    num_views = (num_video_viewpoints,) if num_video_viewpoints > 1 else ()
+    video = torch.rand(1, *num_views, 5, 3, 32, 32)
 
     actions = torch.randn(1, 32, 20)
 
@@ -165,7 +169,7 @@ def test_lora_e2e():
 
     # 4. dummy states and actions
 
-    video = torch.rand(1, 9, 3, 32, 32)
+    video = torch.rand(1, 5, 3, 32, 32)
     joint_state = torch.randn(1, 32)
     actions = torch.randn(1, 32, 20)
 

@@ -312,6 +312,7 @@ class MimicVideo(Module):
         num_advantage_ids = 0,
         advantage_cfg_dropout = 0.25,
         extracted_video_layer_indices: list[int] | None = None,
+        num_video_viewpoints = 1,
         video_time_denoise_mu = 0.,
         video_time_denoise_sigma = 1.,
         eps = 1e-5
@@ -323,6 +324,7 @@ class MimicVideo(Module):
         # maybe video predict
 
         self.video_predict_wrapper = video_predict_wrapper
+        self.num_video_viewpoints = num_video_viewpoints
 
         # action related
 
@@ -346,6 +348,8 @@ class MimicVideo(Module):
         assert exists(dim_video_hidden), f'`dim_video_hidden` must be set or `video_predict_wrapper` passed in with `dim_latent`'
 
         self.dim_video_hidden = dim_video_hidden
+
+        self.view_emb = nn.Parameter(torch.randn(num_video_viewpoints, dim_video_hidden) * 1e-2) if num_video_viewpoints > 1 else None
 
         self.joint_normalizer = None
 
@@ -554,7 +558,7 @@ class MimicVideo(Module):
         task_ids = None,                # (b)
         advantage_ids = None,           # (b)
         dropout_advantage_ids = False,
-        video = None,                   # (b c t h w)
+        video = None,                   # (b t c h w)
         video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
         time = None,                    # () | (b) | (b n)
@@ -579,6 +583,25 @@ class MimicVideo(Module):
 
         is_training = not exists(time) and not return_flow
 
+        # handle multi-view
+
+        has_multi_view = exists(video) and video.ndim == 6
+        num_views = video.shape[1] if has_multi_view else 1
+
+        if has_multi_view:
+            assert num_views == self.num_video_viewpoints
+
+            video = rearrange(video, 'b v ... -> (b v) ...')
+
+            if exists(prompts):
+                if isinstance(prompts, str):
+                    prompts = [prompts] * (batch * num_views)
+                else:
+                    prompts = [p for p in prompts for _ in range(num_views)]
+
+            if exists(time_video_denoise):
+                assert time_video_denoise.shape[0] == batch
+
         if not exists(time_video_denoise):
             if is_training:
                 time_video_denoise = logit_normal_sample(self.video_time_denoise_mu, self.video_time_denoise_sigma, batch, device = self.device)
@@ -602,17 +625,36 @@ class MimicVideo(Module):
 
                 video_forward_wrap = eval_no_grad if no_grad_video_model_forward else identity
         
+                video_timestep = time_video_denoise
+                if has_multi_view:
+                    video_timestep = repeat(time_video_denoise, 'b -> (b v)', v = num_views)
+
                 video_hiddens = video_forward_wrap(self.video_predict_wrapper)(
                     video,
                     prompts = prompts,
                     prompt_token_ids = prompt_token_ids,
-                    timestep = time_video_denoise,
+                    timestep = video_timestep,
                     predict_num_future_latents = predict_num_future_latents
                 )
 
                 video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 
                 video_hiddens = tree_map_tensor(lambda t: pack_with_inverse(t, 'b * d')[0], video_hiddens)
+
+                if has_multi_view and exists(self.view_emb):
+
+                    def process_multi_view(t):
+                        t = rearrange(t, '(b v) n d -> b v n d', v = num_views)
+
+                        # add view embeddings
+
+                        t = einx.add('b v n d, v d -> b v n d', t, self.view_emb)
+
+                        # cross attend to all video hiddens across views - todo: make it an option to do cross attention layer per view
+
+                        return rearrange(t, 'b v n d -> b (v n) d')
+
+                    video_hiddens = tree_map_tensor(process_multi_view, video_hiddens)
 
             # handle video hiddens
 
