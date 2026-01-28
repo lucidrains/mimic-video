@@ -256,8 +256,7 @@ class CosmosPredictWrapper(Module):
             frames = latents.shape[2]
             padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = frames)
 
-            noisy_latents = torch.lerp(latents, noise, padded_timestep)
-
+          
             # train time fixed video prefixing logic - same as train time RTC from Black et al. https://arxiv.org/abs/2512.05964
             # although it is similar (fixed video prefix), it isn't exactly "real time chunking" as in actions
             # researchers are invited to test this
@@ -268,6 +267,8 @@ class CosmosPredictWrapper(Module):
 
                 fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
                 padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
+
+            noisy_latents = torch.lerp(latents, noise, padded_timestep)
 
             self.transformer(
                 hidden_states = noisy_latents,
@@ -391,7 +392,7 @@ class CosmosPredictWrapper(Module):
 
                     fixed_prefix_loss_mask = ~fixed_prefix_mask
 
-                pred = self.transformer(hidden_states = noisy_latents, encoder_hidden_states = encoder_states, timestep = ts * 1000, return_dict = False)[0]
+                pred = self.transformer(hidden_states = noisy_latents, encoder_hidden_states = encoder_states, timestep = padded_ts * 1000, return_dict = False)[0]
 
                 loss = F.mse_loss(pred, flow_target, reduction = 'none')
 
