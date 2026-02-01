@@ -154,6 +154,17 @@ class CosmosPredictWrapper(Module):
         self.train_fixed_video_prefix = train_fixed_video_prefix
         self.train_fixed_video_prefix_max_delay = train_fixed_video_prefix_max_delay
 
+        # latents mean and std initialization
+        if  random_weights:
+            self.latents_mean = torch.zeros(1, self.vae_latent_channels, 1, 1, 1)
+            self.latents_std = torch.ones(1, self.vae_latent_channels, 1, 1, 1)
+        else:
+            mean_list = self.vae.config.latents_mean[:self.vae_latent_channels]
+            std_list = self.vae.config.latents_std[:self.vae_latent_channels]
+
+            self.latents_mean = rearrange(torch.tensor(mean_list), 'c -> 1 c 1 1 1')
+            self.latents_std = rearrange(torch.tensor(std_list), 'c -> 1 c 1 1 1')
+
         self._register_hook()
 
     @property
@@ -228,6 +239,8 @@ class CosmosPredictWrapper(Module):
             encoder_states = encoder_states.last_hidden_state
 
         latents = self.vae.encode(videos).latent_dist.sample()
+       
+        latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
 
         # handle the video denoising times
 
@@ -357,6 +370,7 @@ class CosmosPredictWrapper(Module):
 
                 with torch.no_grad():
                     latents = self.vae.encode(videos).latent_dist.sample()
+                    latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
                     if isinstance(texts, (list, tuple)) and isinstance(texts[0], str):
                         text_inputs = self.tokenizer(texts, return_tensors = "pt", padding = True, truncation = True, max_length = 512).to(device)
                         encoder_states = self.text_encoder(**text_inputs).last_hidden_state
