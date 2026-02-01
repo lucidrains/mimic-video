@@ -155,11 +155,15 @@ class CosmosPredictWrapper(Module):
         self.train_fixed_video_prefix_max_delay = train_fixed_video_prefix_max_delay
 
         # latents mean and std initialization
-        mean_list = self.vae.config.latents_mean[:self.vae_latent_channels]
-        std_list = self.vae.config.latents_std[:self.vae_latent_channels]
+        if  random_weights:
+            self.latents_mean = torch.zeros(1, self.vae_latent_channels, 1, 1, 1)
+            self.latents_std = torch.ones(1, self.vae_latent_channels, 1, 1, 1)
+        else:
+            mean_list = self.vae.config.latents_mean[:self.vae_latent_channels]
+            std_list = self.vae.config.latents_std[:self.vae_latent_channels]
 
-        self.latents_mean = rearrange(torch.tensor(mean_list), 'c -> 1 c 1 1 1')
-        self.latents_std = rearrange(torch.tensor(std_list), 'c -> 1 c 1 1 1')
+            self.latents_mean = rearrange(torch.tensor(mean_list), 'c -> 1 c 1 1 1')
+            self.latents_std = rearrange(torch.tensor(std_list), 'c -> 1 c 1 1 1')
 
         self._register_hook()
 
