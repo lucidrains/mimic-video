@@ -147,13 +147,13 @@ That's it
 ```
 
 ```bibtex
-@misc{wu2026pragmaticvlafoundationmodel,
-    title    = {A Pragmatic VLA Foundation Model}, 
-    author   = {Wei Wu and Fan Lu and Yunnan Wang and Shuai Yang and Shi Liu and Fangjing Wang and Qian Zhu and He Sun and Yong Wang and Shuailei Ma and Yiyu Ren and Kejia Zhang and Hui Yu and Jingmei Zhao and Shuai Zhou and Zhenqi Qiu and Houlong Xiong and Ziyu Wang and Zechen Wang and Ran Cheng and Yong-Lu Li and Yongtao Huang and Xing Zhu and Yujun Shen and Kecheng Zheng},
-    year     = {2026},
-    eprint   = {2601.18692},
+@misc{li2026causalworldmodelingrobot,
+    title  = {Causal World Modeling for Robot Control}, 
+    author = {Lin Li and Qihang Zhang and Yiming Luo and Shuai Yang and Ruilin Wang and Fei Han and Mingrui Yu and Zelin Gao and Nan Xue and Xing Zhu and Yujun Shen and Yinghao Xu},
+    year   = {2026},
+    eprint = {2601.21998},
     archivePrefix = {arXiv},
-    primaryClass = {cs.RO},
-    url      = {https://arxiv.org/abs/2601.18692}, 
+    primaryClass = {cs.CV},
+    url    = {https://arxiv.org/abs/2601.21998}, 
 }
 ```
