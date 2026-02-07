@@ -229,7 +229,6 @@ class CosmosPredictWrapper(Module):
                 device=self.device, 
                 dtype=latents.dtype
             )
-            # Prefix stays 0.0 (Clean). Future gets t_value.
             ts[:, :, num_prefix_frames:] = t_value
             return ts
         
@@ -244,7 +243,7 @@ class CosmosPredictWrapper(Module):
             )
             return
 
-        # ODE loop
+        # ODE solver
         timesteps = torch.linspace(1.0, target_tau, steps + 1, device=self.device)
         curr_latents = latents.clone()
 
@@ -264,11 +263,11 @@ class CosmosPredictWrapper(Module):
                 return_dict=False
             )[0]
 
-            # update future latents
+            # update future latents only
             vel_future = velocity[:, :, num_prefix_frames:]
             curr_latents[:, :, num_prefix_frames:] += vel_future * dt
 
-        #  Final Pass 
+        #  Final pass to get hidden states at target_tau
         self.cached_hidden_states.clear()
         
         final_ts = get_dense_time(target_tau)
