@@ -211,13 +211,84 @@ class CosmosPredictWrapper(Module):
         else:
             self.transformer = PeftModel.from_pretrained(self.transformer, lora_path)
 
+    @torch.no_grad()
+    def sample_flow_trajectory(
+        self,
+        latents: Tensor,            
+        encoder_states: Tensor,      
+        target_tau: float = 1.0,     
+        steps: int = 10,            
+        num_prefix_frames: int = 0
+    ) -> None:
+        
+        batch_size, _, total_frames, _, _ = latents.shape
+      
+        def get_dense_time(t_value):
+            ts = torch.zeros(
+                (batch_size, 1, total_frames, 1, 1), 
+                device=self.device, 
+                dtype=latents.dtype
+            )
+            # Prefix stays 0.0 (Clean). Future gets t_value.
+            ts[:, :, num_prefix_frames:] = t_value
+            return ts
+        
+        if target_tau >= 1.0 - 1e-4:
+            ts = get_dense_time(999)
+            self.cached_hidden_states.clear()
+            self.transformer(
+                hidden_states=latents,
+                encoder_hidden_states=encoder_states,
+                timestep=ts,
+                return_dict=False
+            )
+            return
+
+        # ODE loop
+        timesteps = torch.linspace(1.0, target_tau, steps + 1, device=self.device)
+        curr_latents = latents.clone()
+
+        for i in range(steps):
+            t_curr = timesteps[i]
+            t_next = timesteps[i+1]
+            dt = t_next - t_curr  
+
+            ts = get_dense_time(t_curr)
+
+            self.cached_hidden_states.clear() 
+            
+            velocity = self.transformer(
+                hidden_states=curr_latents,
+                encoder_hidden_states=encoder_states,
+                timestep=ts * 1000, 
+                return_dict=False
+            )[0]
+
+            # update future latents
+            vel_future = velocity[:, :, num_prefix_frames:]
+            curr_latents[:, :, num_prefix_frames:] += vel_future * dt
+
+        #  Final Pass 
+        self.cached_hidden_states.clear()
+        
+        final_ts = get_dense_time(target_tau)
+    
+        self.transformer(
+            hidden_states=curr_latents,
+            encoder_hidden_states=encoder_states,
+            timestep=final_ts * 1000,
+            return_dict=False
+        )
+
     def forward(
         self,
         videos: Tensor,
         prompts: str | list[str] | None = None,
         prompt_token_ids: Tensor | None = None,
         timestep: float | Tensor | None = None,
-        predict_num_future_latents = 0 # number of future frames to predict at inference - presumably the given video will be fixed at T = 0, with the future predicted frames at T = 1
+        predict_num_future_latents = 0, # number of future frames to predict at inference - presumably the given video will be fixed at T = 0, with the future predicted frames at T = 1
+        video_flow_target_tau: float = 1.0,
+        inference_steps: int = 10
     ) -> Tensor | list[Tensor]:
 
         batch = videos.shape[0]
@@ -295,28 +366,17 @@ class CosmosPredictWrapper(Module):
             
             num_prefix_frames = latents.shape[2]
 
-            # timesteps
+            pred_shape = shape_with_replace(latents, {2: predict_num_future_latents})
+            future_noise = torch.randn(pred_shape, device = latents.device)
 
-            total_frames = num_prefix_frames + predict_num_future_latents
+            starting_latents = cat((latents, future_noise), dim = 2)
 
-            timestep = torch.zeros((batch, 1, total_frames, 1, 1), device = self.device)
-            timestep[:, :, num_prefix_frames:] = 999.
-
-            # get the future latents
-
-            pred_shape = shape_with_replace(latents, {2: predict_num_future_latents}) # same shape as latents, but with frame replaced with some custom hyperparameter
-
-            future_latents = torch.randn(pred_shape, device = latents.device)
-
-            # concat clean prefix with noised future
-
-            model_input = cat((latents, future_latents), dim = 2)
-
-            self.transformer(
-                hidden_states = model_input,
-                encoder_hidden_states = encoder_states,
-                timestep = timestep,
-                return_dict = False
+            self.sample_flow_trajectory(
+                latents = starting_latents,
+                encoder_states = encoder_states,
+                target_tau = video_flow_target_tau,
+                steps = inference_steps,
+                num_prefix_frames = num_prefix_frames
             )
 
         hiddens = self.cached_hidden_states[:len(self.extract_layers)]
