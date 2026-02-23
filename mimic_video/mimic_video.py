@@ -1,5 +1,6 @@
 from __future__ import annotations
 from functools import partial
+from collections import namedtuple
 
 import torch
 from torch import nn, cat, stack, is_tensor, tensor
@@ -175,6 +176,8 @@ class AdaptiveRMSNorm(Module):
 
 # attention
 
+Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len'])
+
 class Attention(Module):
     def __init__(
         self,
@@ -219,17 +222,24 @@ class Attention(Module):
         return_kv = False
     ):
         context = default(context, tokens)
+        is_self_attn = context is tokens
 
         queries = self.to_queries(tokens)
         queries = self.split_q_heads(queries)
 
-        if not exists(kv):
+        if exists(kv) and not is_self_attn:
+            keys, values = kv
+        else:
             context = self.context_norm(context)
-
             keys, values = self.to_keys_values(context).chunk(2, dim = -1)
             keys, values = tuple(self.split_kv_heads(t) for t in (keys, values))
-        else:
-            keys, values = kv
+
+        current_kv = stack((keys, values))
+
+        if exists(kv) and is_self_attn:
+            prev_keys, prev_values = kv
+            keys = cat((prev_keys, keys), dim = -2)
+            values = cat((prev_values, values), dim = -2)
 
         queries = queries * self.scale
 
@@ -254,7 +264,7 @@ class Attention(Module):
         if not return_kv:
             return out
 
-        return out, stack((keys, values))
+        return out, current_kv
 
 # feedforward
 
@@ -389,7 +399,7 @@ class MimicVideo(Module):
 
         # rnn
 
-        self.rnn = GRU(dim, dim)
+        self.rnn = GRU(dim, dim, batch_first = True)
 
         # transformer
 
@@ -666,8 +676,9 @@ class MimicVideo(Module):
 
         # handle caching
 
-        prev_cached_video_hiddens_kv = cache if exists(cache) else ((None,) * self.depth)
-        next_cached_video_hiddens_kv = []
+        prev_self_kv, prev_gru_hidden, prev_seq_len = cache if exists(cache) else ((None,) * self.depth, None, 0)
+
+        next_cached_self_attn_kv = []
 
         # handle flow time conditioning
 
@@ -724,7 +735,7 @@ class MimicVideo(Module):
 
         # one layer of rnn for actions
 
-        rnn_out, _, = self.rnn(tokens)
+        rnn_out, gru_hidden = self.rnn(tokens, prev_gru_hidden)
         tokens = rnn_out + tokens
 
         #  mask joint state token for proprioception masking training
@@ -800,7 +811,7 @@ class MimicVideo(Module):
             maybe_ff_mhc,
             ff_norm,
             ff
-        ), layer_video_hidden_index, cached_video_kv) in zip(self.layers, self.extracted_video_layer_indices, prev_cached_video_hiddens_kv):
+        ), layer_video_hidden_index, cached_self_kv) in zip(self.layers, self.extracted_video_layer_indices, prev_self_kv):
 
             # cross attention
 
@@ -813,12 +824,9 @@ class MimicVideo(Module):
             if exists(video_hiddens):
                 layer_video_hidden = video_hiddens[layer_video_hidden_index]
 
-            cross_attn_out, video_kv = cross_attn(tokens, context = layer_video_hidden, context_mask = context_mask, kv = cached_video_kv, return_kv = True)
+            cross_attn_out = cross_attn(tokens, context = layer_video_hidden, context_mask = context_mask)
 
             tokens = add_residual(cross_attn_out * gate)
-
-            if return_cache:
-                next_cached_video_hiddens_kv.append(video_kv)
 
             # self attention
 
@@ -826,7 +834,11 @@ class MimicVideo(Module):
 
             tokens, gate = attn_norm(tokens, time_cond)
 
-            tokens = add_residual(attn(tokens) * gate)
+            attn_out, self_kv = attn(tokens, kv = cached_self_kv, return_kv = True)
+            tokens = add_residual(attn_out * gate)
+
+            if return_cache:
+                next_cached_self_attn_kv.append(self_kv)
 
             # prepare feedforward
 
@@ -883,4 +895,4 @@ class MimicVideo(Module):
 
         # handle returning of cache
 
-        return out, next_cached_video_hiddens_kv
+        return out, Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1])
