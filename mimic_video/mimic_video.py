@@ -192,6 +192,8 @@ class Attention(Module):
         dim_q_inner = dim_head * heads
         dim_kv_inner = dim_head * kv_heads
 
+        self.has_attn_gate_value = attn_gate_value
+
         dim_context = default(dim_context, dim)
         self.context_norm = nn.RMSNorm(dim_context) if norm_context else nn.Identity()
 
@@ -200,7 +202,8 @@ class Attention(Module):
         self.to_queries = LinearNoBias(dim, dim_q_inner)
         self.to_keys_values = LinearNoBias(dim_context, dim_kv_inner * 2)
 
-        self.attn_gate_value = nn.Sequential(LinearNoBias(dim, heads), Rearrange('b n (g h) -> b g h n 1', h = kv_heads))
+        if attn_gate_value:
+            self.attn_gate_value = nn.Sequential(LinearNoBias(dim, heads), Rearrange('b n (g h) -> b g h n 1', h = kv_heads))
 
         self.to_out = LinearNoBias(dim_q_inner, dim)
 
@@ -253,7 +256,8 @@ class Attention(Module):
 
         # https://openreview.net/forum?id=1b7whO4SfY - should become standard practice
 
-        out = out * self.attn_gate_value(tokens).sigmoid()
+        if self.has_attn_gate_value:
+            out = out * self.attn_gate_value(tokens).sigmoid()
 
         out = self.merge_heads(out)
 
@@ -308,7 +312,8 @@ class AttentionPool(Module):
             dim_context = dim_context,
             heads = heads,
             dim_head = dim_head,
-            norm_context = True
+            norm_context = True,
+            attn_gate_value = False
         )
 
     def forward(self, context):
