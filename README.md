@@ -100,60 +100,72 @@ That's it
 
 ```bibtex
 @misc{li2025basicsletdenoisinggenerative,
-    title   = {Back to Basics: Let Denoising Generative Models Denoise}, 
+    title   = {Back to Basics: Let Denoising Generative Models Denoise},
     author  = {Tianhong Li and Kaiming He},
     year    = {2025},
     eprint  = {2511.13720},
     archivePrefix = {arXiv},
     primaryClass = {cs.CV},
-    url     = {https://arxiv.org/abs/2511.13720}, 
+    url     = {https://arxiv.org/abs/2511.13720},
 }
 ```
 
 ```bibtex
 @misc{black2025trainingtimeactionconditioningefficient,
-    title   = {Training-Time Action Conditioning for Efficient Real-Time Chunking}, 
+    title   = {Training-Time Action Conditioning for Efficient Real-Time Chunking},
     author  = {Kevin Black and Allen Z. Ren and Michael Equi and Sergey Levine},
     year    = {2025},
     eprint  = {2512.05964},
     archivePrefix = {arXiv},
     primaryClass = {cs.RO},
-    url     = {https://arxiv.org/abs/2512.05964}, 
+    url     = {https://arxiv.org/abs/2512.05964},
 }
 ```
 
 ```bibtex
 @misc{intelligence2025pi06vlalearnsexperience,
-    title   = {$\pi^{*}_{0.6}$: a VLA That Learns From Experience}, 
+    title   = {$\pi^{*}_{0.6}$: a VLA That Learns From Experience},
     author  = {Physical Intelligence and Ali Amin and Raichelle Aniceto and Ashwin Balakrishna and Kevin Black and Ken Conley and Grace Connors and James Darpinian and Karan Dhabalia and Jared DiCarlo and Danny Driess and Michael Equi and Adnan Esmail and Yunhao Fang and Chelsea Finn and Catherine Glossop and Thomas Godden and Ivan Goryachev and Lachy Groom and Hunter Hancock and Karol Hausman and Gashon Hussein and Brian Ichter and Szymon Jakubczak and Rowan Jen and Tim Jones and Ben Katz and Liyiming Ke and Chandra Kuchi and Marinda Lamb and Devin LeBlanc and Sergey Levine and Adrian Li-Bell and Yao Lu and Vishnu Mano and Mohith Mothukuri and Suraj Nair and Karl Pertsch and Allen Z. Ren and Charvi Sharma and Lucy Xiaoyang Shi and Laura Smith and Jost Tobias Springenberg and Kyle Stachowicz and Will Stoeckle and Alex Swerdlow and James Tanner and Marcel Torne and Quan Vuong and Anna Walling and Haohuan Wang and Blake Williams and Sukwon Yoo and Lili Yu and Ury Zhilinsky and Zhiyuan Zhou},
     year    = {2025},
     eprint  = {2511.14759},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2511.14759}, 
+    url     = {https://arxiv.org/abs/2511.14759},
 }
 ```
 
 ```bibtex
 @misc{kim2026cosmospolicyfinetuningvideo,
-    title   = {Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning}, 
+    title   = {Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning},
     author  = {Moo Jin Kim and Yihuai Gao and Tsung-Yi Lin and Yen-Chen Lin and Yunhao Ge and Grace Lam and Percy Liang and Shuran Song and Ming-Yu Liu and Chelsea Finn and Jinwei Gu},
     year    = {2026},
     eprint  = {2601.16163},
     archivePrefix = {arXiv},
     primaryClass = {cs.AI},
-    url     = {https://arxiv.org/abs/2601.16163}, 
+    url     = {https://arxiv.org/abs/2601.16163},
 }
 ```
 
 ```bibtex
 @misc{li2026causalworldmodelingrobot,
-    title  = {Causal World Modeling for Robot Control}, 
+    title  = {Causal World Modeling for Robot Control},
     author = {Lin Li and Qihang Zhang and Yiming Luo and Shuai Yang and Ruilin Wang and Fei Han and Mingrui Yu and Zelin Gao and Nan Xue and Xing Zhu and Yujun Shen and Yinghao Xu},
     year   = {2026},
     eprint = {2601.21998},
     archivePrefix = {arXiv},
     primaryClass = {cs.CV},
-    url    = {https://arxiv.org/abs/2601.21998}, 
+    url    = {https://arxiv.org/abs/2601.21998},
+}
+```
+
+```bibtex
+@misc{kimiteam2026attentionresiduals,
+    title   = {Attention Residuals},
+    author  = {Kimi Team and Guangyu Chen and Yu Zhang and Jianlin Su and Weixin Xu and Siyuan Pan and Yaoyu Wang and Yucheng Wang and Guanduo Chen and Bohong Yin and Yutian Chen and Junjie Yan and Ming Wei and Y. Zhang and Fanqing Meng and Chao Hong and Xiaotong Xie and Shaowei Liu and Enzhe Lu and Yunpeng Tai and Yanru Chen and Xin Men and Haiqing Guo and Y. Charles and Haoyu Lu and Lin Sui and Jinguo Zhu and Zaida Zhou and Weiran He and Weixiao Huang and Xinran Xu and Yuzhi Wang and Guokun Lai and Yulun Du and Yuxin Wu and Zhilin Yang and Xinyu Zhou},
+    year    = {2026},
+    eprint  = {2603.15031},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CL},
+    url     = {https://arxiv.org/abs/2603.15031},
 }
 ```

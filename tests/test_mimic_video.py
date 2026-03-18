@@ -4,13 +4,11 @@ param = pytest.mark.parametrize
 import torch
 
 @param('model_output_clean', (False, True))
-@param('num_residual_streams', (1, 4))
 @param('train_time_rtc', (False, True))
 @param('action_stats_given', (False, True))
 @param('condition_tokens_given', (False, True))
 def test_mimic_video(
     model_output_clean,
-    num_residual_streams,
     train_time_rtc,
     action_stats_given,
     condition_tokens_given,
@@ -33,7 +31,6 @@ def test_mimic_video(
         512,
         action_mean_std = action_mean_std,
         dim_video_hidden = 77,
-        num_residual_streams = num_residual_streams,
         train_time_rtc = train_time_rtc,
         train_time_rtc_max_delay = 4,
         num_advantage_ids = 2,
@@ -55,12 +52,10 @@ def test_mimic_video(
 
     assert flow.shape == actions.shape
 
-@param('num_residual_streams', (1, 4))
 @param('prev_action_chunk', (False, True))
 @param('cross_attend_multiple', (False, True))
 @param('num_video_viewpoints', (1, 2))
 def test_e2e(
-    num_residual_streams,
     prev_action_chunk,
     cross_attend_multiple,
     num_video_viewpoints
@@ -84,7 +79,6 @@ def test_e2e(
     model = MimicVideo(
         512,
         video_wrapper,
-        num_residual_streams = num_residual_streams,
         depth = 3,
         extracted_video_layer_indices = extracted_video_layer_indices,
         num_video_viewpoints = num_video_viewpoints

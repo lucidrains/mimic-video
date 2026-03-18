@@ -26,8 +26,6 @@ from torch_einops_utils import (
     tree_map_tensor
 )
 
-from hyper_connections.mHCv2 import get_init_and_expand_reduce_stream_functions
-
 # ein notation
 
 # b - batch
@@ -176,7 +174,7 @@ class AdaptiveRMSNorm(Module):
 
 # attention
 
-Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len'])
+Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len', 'video_hiddens'])
 
 class Attention(Module):
     def __init__(
@@ -291,6 +289,66 @@ class SwiGLUFeedForward(Module):
 
         return self.proj_out(out)
 
+# attention residuals - https://arxiv.org/abs/2603.15031
+
+class AttentionPool(Module):
+    def __init__(
+        self,
+        dim,
+        dim_context = None,
+        heads = 8,
+        dim_head = 64
+    ):
+        super().__init__()
+        dim_context = default(dim_context, dim)
+        self.queries = nn.Parameter(torch.zeros(dim))
+
+        self.pooler = Attention(
+            dim = dim,
+            dim_context = dim_context,
+            heads = heads,
+            dim_head = dim_head,
+            norm_context = True
+        )
+
+    def forward(self, context):
+        batch = context.shape[0]
+        queries = repeat(self.queries, 'd -> b 1 d', b = batch)
+        return self.pooler(queries, context = context).squeeze(1)
+
+class AttentionAggregatedResidual(Module):
+    def __init__(
+        self,
+        dim,
+        heads = 4,
+        dim_head = 64
+    ):
+        super().__init__()
+
+        self.attn_pool = AttentionPool(
+            dim = dim,
+            dim_context = dim,
+            heads = heads,
+            dim_head = dim_head,
+        )
+
+    def forward(
+        self,
+        layer_outputs: list[Tensor],
+    ):
+        assert len(layer_outputs) > 0
+
+        if len(layer_outputs) == 1:
+            return layer_outputs[0]
+
+        stacked = stack(layer_outputs, dim = 2)
+
+        packed, inverse_pack = pack_with_inverse(stacked, '* l d')
+
+        pooled = self.attn_pool(packed)
+
+        return inverse_pack(pooled, '* d')
+
 # classes
 
 class MimicVideo(Module):
@@ -307,14 +365,14 @@ class MimicVideo(Module):
         depth = 8,
         dim_head = 64,
         heads = 8,
+        attention_residual_heads = 4,
+        attention_residual_dim_head = 64,
         expansion_factor = 4.,
         ada_ln_zero_bias = -5.,
         dim_time_cond = None,
         sample_time_fn = None,
         train_time_rtc = False,
         train_time_rtc_max_delay = None,
-        num_residual_streams = 1,
-        mhc_kwargs: dict = dict(),
         action_mean_std: Tensor | None = None,
         joint_mean_std: Tensor | None = None,
         model_output_clean = True,  # https://arxiv.org/abs/2511.13720 - Kaiming He group paper
@@ -389,14 +447,6 @@ class MimicVideo(Module):
 
         self.proprio_mask_token = nn.Parameter(torch.randn(dim))
 
-        # video norm
-
-        self.video_hidden_norm = nn.RMSNorm(dim_video_hidden)
-
-        # manifold constrained hyper connections (mHC) from bytedance + deepseek
-
-        init_hyper_conn, self.expand_stream, self.reduce_stream = get_init_and_expand_reduce_stream_functions(num_residual_streams, dim = dim, add_stream_embed = True, **mhc_kwargs)
-
         # rnn
 
         self.rnn = GRU(dim, dim, batch_first = True)
@@ -418,11 +468,11 @@ class MimicVideo(Module):
 
             ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
 
-            # maybe hyper connect
+            # attention residuals
 
-            attn_residual = init_hyper_conn()
-            cross_attn_residual = init_hyper_conn()
-            ff_residual = init_hyper_conn()
+            attn_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
+            cross_attn_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
+            ff_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
 
             layers.append(ModuleList([
                 cross_attn_residual,
@@ -437,6 +487,8 @@ class MimicVideo(Module):
             ]))
 
         self.layers = ModuleList(layers)
+
+        self.final_attn_agg = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
 
         # predictions
 
@@ -634,7 +686,7 @@ class MimicVideo(Module):
                 assert exists(self.video_predict_wrapper), f'`video_predict_wrapper` must be passed in if raw video is passed into MimicVideo'
 
                 video_forward_wrap = eval_no_grad if no_grad_video_model_forward else identity
-        
+
                 video_timestep = time_video_denoise
                 if has_multi_view:
                     video_timestep = repeat(time_video_denoise, 'b -> (b v)', v = num_views)
@@ -676,7 +728,10 @@ class MimicVideo(Module):
 
         # handle caching
 
-        prev_self_kv, prev_gru_hidden, prev_seq_len = cache if exists(cache) else ((None,) * self.depth, None, 0)
+        prev_self_kv, prev_gru_hidden, prev_seq_len, cached_video_hiddens = cache if exists(cache) else ((None,) * self.depth, None, 0, None)
+
+        if exists(cached_video_hiddens):
+            video_hiddens = cached_video_hiddens
 
         next_cached_self_attn_kv = []
 
@@ -795,72 +850,70 @@ class MimicVideo(Module):
 
         tokens, inverse_pack = pack_with_inverse((advantage_embed, task_embed, joint_state_token, tokens), 'b * d')
 
-        # maybe expand streams
-
-        tokens = self.expand_stream(tokens)
-
         # transformer layers
 
+        layer_outputs = [tokens]
+
         for ((
-            maybe_cross_attn_mhc,
+            cross_attn_agg,
             cross_attn_norm,
             cross_attn,
-            maybe_attn_mhc,
+            attn_agg,
             attn_norm,
             attn,
-            maybe_ff_mhc,
+            ff_agg,
             ff_norm,
             ff
         ), layer_video_hidden_index, cached_self_kv) in zip(self.layers, self.extracted_video_layer_indices, prev_self_kv):
 
             # cross attention
 
-            tokens, add_residual = maybe_cross_attn_mhc(tokens)
+            tokens = cross_attn_agg(layer_outputs)
 
-            tokens, gate = cross_attn_norm(tokens, time_cond)
+            branch_tokens, gate = cross_attn_norm(tokens, time_cond)
 
             layer_video_hidden = None
 
             if exists(video_hiddens):
                 layer_video_hidden = video_hiddens[layer_video_hidden_index]
 
-            cross_attn_out = cross_attn(tokens, context = layer_video_hidden, context_mask = context_mask)
+            cross_attn_out = cross_attn(branch_tokens, context = layer_video_hidden, context_mask = context_mask)
 
-            tokens = add_residual(cross_attn_out * gate)
+            layer_outputs.append(cross_attn_out * gate)
 
             # self attention
 
-            tokens, add_residual = maybe_attn_mhc(tokens)
+            tokens = attn_agg(layer_outputs)
 
-            tokens, gate = attn_norm(tokens, time_cond)
+            branch_tokens, gate = attn_norm(tokens, time_cond)
 
-            attn_out, self_kv = attn(tokens, kv = cached_self_kv, return_kv = True)
-            tokens = add_residual(attn_out * gate)
+            attn_out, self_kv = attn(branch_tokens, kv = cached_self_kv, return_kv = True)
+            layer_outputs.append(attn_out * gate)
 
             if return_cache:
                 next_cached_self_attn_kv.append(self_kv)
 
             # prepare feedforward
 
-            tokens, add_residual = maybe_ff_mhc(tokens)
+            tokens = ff_agg(layer_outputs)
 
-            tokens, gate = ff_norm(tokens, time_cond)
+            branch_tokens, gate = ff_norm(tokens, time_cond)
 
             # shift along time for action tokens for cheap relative positioning, which is better than messing with rope with such short action chunks
 
-            *non_action_tokens, tokens = inverse_pack(tokens)
+            *non_action_tokens, branch_tokens = inverse_pack(branch_tokens)
 
-            tokens = shift_feature_dim(tokens)
+            branch_tokens = shift_feature_dim(branch_tokens)
 
-            tokens, _ = pack_with_inverse((*non_action_tokens, tokens), 'b * d')
+            branch_tokens, _ = pack_with_inverse((*non_action_tokens, branch_tokens), 'b * d')
 
             # feedforward
 
-            tokens = add_residual(ff(tokens) * gate)
+            layer_outputs.append(ff(branch_tokens) * gate)
 
-        # maybe reduce streams
+        # final attention aggregation
 
-        tokens = self.reduce_stream(tokens)
+        tokens = self.final_attn_agg(layer_outputs)
 
         # remove joint token
 
@@ -895,4 +948,4 @@ class MimicVideo(Module):
 
         # handle returning of cache
 
-        return out, Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1])
+        return out, Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1], video_hiddens)

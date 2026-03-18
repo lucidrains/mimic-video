@@ -136,7 +136,7 @@ class CosmosPredictWrapper(Module):
 
         self.hook_handles = []
         self.cached_hidden_states = []
-        
+
         if random_weights:
             self._init_random_weights(tiny = tiny)
         else:
@@ -186,12 +186,12 @@ class CosmosPredictWrapper(Module):
         config_5 = TINY_T5_CONFIG if tiny else REAL_T5_CONFIG
 
         num_layers = max(28 if not tiny else 2, *[layer + 1 for layer in self.extract_layers])
-        
+
         self.transformer = CosmosTransformer3DModel(num_layers = num_layers, **config_t)
         self.vae = AutoencoderKLCosmos(**config_v)
         self.text_encoder = T5EncoderModel(T5Config(**config_5))
         self.tokenizer = T5TokenizerFast.from_pretrained("google-t5/t5-small")
-        
+
         self.vae_temporal_compression_ratio = config_v['temporal_compression_ratio']
         self.vae_spatial_compression_ratio = config_v['spatial_compression_ratio']
         self.vae_latent_channels = config_v['latent_channels']
@@ -214,24 +214,24 @@ class CosmosPredictWrapper(Module):
     @torch.no_grad()
     def sample_flow_trajectory(
         self,
-        latents: Tensor,            
-        encoder_states: Tensor,      
-        target_tau: float = 1.0,     
-        steps: int = 10,            
+        latents: Tensor,
+        encoder_states: Tensor,
+        target_tau: float = 1.0,
+        steps: int = 10,
         num_prefix_frames: int = 0
     ) -> None:
-        
+
         batch_size, _, total_frames, _, _ = latents.shape
-      
+
         def get_dense_time(t_value):
             ts = torch.zeros(
-                (batch_size, 1, total_frames, 1, 1), 
-                device=self.device, 
+                (batch_size, 1, total_frames, 1, 1),
+                device=self.device,
                 dtype=latents.dtype
             )
             ts[:, :, num_prefix_frames:] = t_value
             return ts
-        
+
         if target_tau >= 1.0 - 1e-4:
             ts = get_dense_time(999)
             self.cached_hidden_states.clear()
@@ -250,16 +250,16 @@ class CosmosPredictWrapper(Module):
         for i in range(steps):
             t_curr = timesteps[i]
             t_next = timesteps[i+1]
-            dt = t_next - t_curr  
+            dt = t_next - t_curr
 
             ts = get_dense_time(t_curr)
 
-            self.cached_hidden_states.clear() 
-            
+            self.cached_hidden_states.clear()
+
             velocity = self.transformer(
                 hidden_states=curr_latents,
                 encoder_hidden_states=encoder_states,
-                timestep=ts * 1000, 
+                timestep=ts * 1000,
                 return_dict=False
             )[0]
 
@@ -269,9 +269,9 @@ class CosmosPredictWrapper(Module):
 
         #  Final pass to get hidden states at target_tau
         self.cached_hidden_states.clear()
-        
+
         final_ts = get_dense_time(target_tau)
-    
+
         self.transformer(
             hidden_states=curr_latents,
             encoder_hidden_states=encoder_states,
@@ -309,7 +309,7 @@ class CosmosPredictWrapper(Module):
             encoder_states = encoder_states.last_hidden_state
 
         latents = self.vae.encode(videos).latent_dist.sample()
-       
+
         latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
 
         # handle the video denoising times
@@ -339,7 +339,7 @@ class CosmosPredictWrapper(Module):
             frames = latents.shape[2]
             padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = frames)
 
-          
+
             # train time fixed video prefixing logic - same as train time RTC from Black et al. https://arxiv.org/abs/2512.05964
             # although it is similar (fixed video prefix), it isn't exactly "real time chunking" as in actions
             # researchers are invited to test this
@@ -362,7 +362,7 @@ class CosmosPredictWrapper(Module):
 
         else:
             # conditioning on time=0 for prefix (clean), and time=999 for future (noise)
-            
+
             num_prefix_frames = latents.shape[2]
 
             pred_shape = shape_with_replace(latents, {2: predict_num_future_latents})
@@ -415,7 +415,7 @@ class CosmosPredictWrapper(Module):
 
         dataloader = DataLoader(dataset, batch_size = batch_size, shuffle = True)
         optimizer = torch.optim.AdamW(self.transformer.parameters(), lr = lr)
-        
+
         self.transformer, self.vae, self.text_encoder, optimizer, dataloader = accelerator.prepare(
             self.transformer, self.vae, self.text_encoder, optimizer, dataloader
         )
