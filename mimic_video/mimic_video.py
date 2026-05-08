@@ -861,7 +861,7 @@ class MimicVideo(Module):
         # convert to flow if outputting in x0 space
 
         if self.model_output_clean:
-            pred_flow = (pred - actions) / pad_right_ndim_to(1. - action_time, pred.ndim).clamp_min(self.eps)
+            pred_flow = (pred - noised) / pad_right_ndim_to(1. - action_time, pred.ndim).clamp_min(self.eps)
         else:
             pred_flow = pred
 
