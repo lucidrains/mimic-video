@@ -8,6 +8,8 @@ Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Mo
 
 - [Pranoy](https://github.com/pranoyr) for submitting a pull request for proprioception masking, fixing the time conditioning of the video model, and Cosmos VAE normalization
 
+- [Pranoy](https://github.com/pranoyr) for a fix to flow calculation for predict clean objective!
+
 ## Install
 
 ```shell
