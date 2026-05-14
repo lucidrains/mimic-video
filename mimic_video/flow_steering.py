@@ -78,9 +78,21 @@ class FlowSteering(Module):
         self,
         *args,
         actions = None,
+        exploration_noise = None,
+        exploration_noise_std = None,
         **kwargs
     ):
         noise_latents = self.actor_forward(*args, **kwargs)
+
+        # maybe exploration noise for the noise latent actions
+
+        assert not (exists(exploration_noise) and exists(exploration_noise_std))
+
+        if exists(exploration_noise_std):
+            exploration_noise = torch.randn_like(noise_latents) * exploration_noise_std
+
+        if exists(exploration_noise):
+            noise_latents = noise_latents + exploration_noise
 
         with torch.no_grad():
             self.action_flow_model.eval()
