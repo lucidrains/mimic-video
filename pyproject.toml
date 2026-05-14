@@ -24,13 +24,15 @@ classifiers=[
 ]
 
 dependencies = [
-    "einx>=0.3.0",
+    "einx>=0.4.0",
     "einops>=0.8.1",
+    "ema-pytorch",
     "peft",
     "torch>=2.5",
-    "torch-einops-utils>=0.0.17",
+    "torch-einops-utils>=0.0.34",
     "tqdm",
-    "x-mlps-pytorch"
+    "x-mlps-pytorch",
+    "x-transformers"
 ]
 
 [project.urls]

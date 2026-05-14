@@ -193,3 +193,58 @@ def test_lora_e2e():
 
     if os.path.exists(save_path):
         shutil.rmtree(save_path)
+
+def test_latent_steering():
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.cosmos_predict import CosmosPredictWrapper
+    from mimic_video.diffusion_steering import DiffusionSteering
+
+    video_wrapper = CosmosPredictWrapper(
+        extract_layer = 1,
+        random_weights = True,
+        tiny = True
+    )
+
+    # mimic video
+
+    model = MimicVideo(512, video_wrapper)
+
+    # wrap model with diffusion steering
+
+    model = DiffusionSteering(model)
+
+    # states
+
+    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+
+    joint_state = torch.randn(2, 32)
+
+    # action
+
+    actions = torch.randn(2, 32, 20)
+
+    # training
+
+    loss = model(
+        prompts = [
+            'put the package on the conveyer belt',
+            'pass the butter'
+        ],
+        actions = actions,
+        video = video,
+        joint_state = joint_state,
+        next_video = video,
+        next_joint_state = joint_state
+    )
+
+    loss.backward()
+
+    # inference
+
+    actions = model.sample(
+        prompts = 'peel the orange',
+        video = video[:1],
+        joint_state = joint_state[:1]
+    )
+
+    assert actions.shape == (1, 32, 20)
