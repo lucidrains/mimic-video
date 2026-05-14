@@ -1100,8 +1100,10 @@ class MimicVideo(Module):
             out = pred_flow
         else:
             # mse flow loss
-
-            flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
+            if self.model_output_clean:
+                flow_loss = F.mse_loss(pred, actions, reduction = 'none')
+            else:
+                flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
 
             out = masked_mean(flow_loss, action_loss_mask)
 
