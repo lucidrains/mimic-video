@@ -15,6 +15,27 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+# loss related
+
+# expectile regression
+# for expectile bellman proposed by https://arxiv.org/abs/2406.04081v1
+
+def expectile_l2_loss(
+    x,
+    target,
+    tau = 0.5  # 0.5 would be the classic l2 loss - less would weigh negative higher, and more would weigh positive higher
+):
+    assert 0 <= tau <= 1.
+
+    if tau == 0.5:
+        return F.mse_loss(x, target)
+
+    diff = x - target
+
+    weight = torch.where(diff < 0, tau, 1. - tau)
+
+    return (weight * diff.square()).mean()
+
 # classes
 
 class FlowSteering(Module):
@@ -27,6 +48,8 @@ class FlowSteering(Module):
         actor_loss_weight = 1.,
         outer_critic_loss_weight = 1.,
         inner_critic_loss_weight = 1.,
+        use_minto = True,
+        expectile_tau = 0.5,
         ema_kwargs: dict | None = None
     ):
         super().__init__()
@@ -39,7 +62,12 @@ class FlowSteering(Module):
         self.inner_critic_loss_weight = inner_critic_loss_weight
 
         self.action_flow_model = model
+
+        # actor steering the noise latent space
+
         self.actor = model.create_actor_from()
+
+        # critics
 
         self.outer_critic = model.create_critic_from()
         self.inner_critic = model.create_critic_from()
@@ -53,6 +81,13 @@ class FlowSteering(Module):
 
         for m in (self.action_flow_model, self.actor.model, self.outer_critic.model, self.inner_critic.model, self.ema_outer_critic.ema_model.model, self.ema_inner_critic.ema_model.model):
             m.video_predict_wrapper = video_wrapper
+
+        # minto
+
+        self.use_minto = use_minto
+
+        assert 0 <= expectile_tau <= 0.5
+        self.expectile_tau = expectile_tau
 
     def actor_forward(
         self,
@@ -120,11 +155,22 @@ class FlowSteering(Module):
 
         # bellman for outer critic
 
-        target_q = rewards + self.discount_factor * self.ema_outer_critic(*args, video = next_video, joint_state = next_joint_state, actions = next_actions, **kwargs)
+        next_critic_kwargs = dict(
+            video = next_video, joint_state = next_joint_state, actions = next_actions, **kwargs
+        )
 
-        outer_critic_loss = F.mse_loss(
+        next_pred_q = self.ema_outer_critic(*args, **next_critic_kwargs)
+
+        if self.use_minto:
+            online_next_pred_q = self.outer_critic(*args, **next_critic_kwargs)
+            next_pred_q = torch.minimum(next_pred_q, online_next_pred_q)
+
+        target_q = rewards + self.discount_factor * next_pred_q
+
+        outer_critic_loss = expectile_l2_loss(
             self.outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs),
-            target_q.detach()
+            target_q.detach(),
+            tau = self.expectile_tau
         )
 
         # tether the inner critic to the outer critic q estimation

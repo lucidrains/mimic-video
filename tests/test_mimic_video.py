@@ -194,7 +194,9 @@ def test_lora_e2e():
     if os.path.exists(save_path):
         shutil.rmtree(save_path)
 
-def test_latent_steering():
+@param('use_minto', (False, True))
+@param('expectile_tau', (0.1, 0.5))
+def test_latent_steering(use_minto, expectile_tau):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
     from mimic_video.flow_steering import FlowSteering
@@ -211,7 +213,7 @@ def test_latent_steering():
 
     # wrap model with diffusion steering
 
-    model = FlowSteering(model)
+    model = FlowSteering(model, use_minto = use_minto, expectile_tau = expectile_tau)
 
     # states
 

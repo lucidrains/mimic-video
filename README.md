@@ -183,3 +183,25 @@ That's it
     url     = {https://arxiv.org/abs/2506.15799},
 }
 ```
+
+```bibtex
+@inproceedings{hendawy2026use,
+    title   = {Use the Online Network If You Can: Towards Fast and Stable Reinforcement Learning},
+    author  = {Ahmed Hendawy and Henrik Metternich and Th{\'e}o Vincent and Mahdi Kallel and Jan Peters and Carlo D'Eramo},
+    booktitle = {The Fourteenth International Conference on Learning Representations},
+    year    = {2026},
+    url     = {https://openreview.net/forum?id=rFLuaG9Yq6}
+}
+```
+
+```bibtex
+@misc{clavier2024bootstrappingexpectilesreinforcementlearning,
+    title   = {Bootstrapping Expectiles in Reinforcement Learning},
+    author  = {Pierre Clavier and Emmanuel Rachelson and Erwan Le Pennec and Matthieu Geist},
+    year    = {2024},
+    eprint  = {2406.04081},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2406.04081},
+}
+```
