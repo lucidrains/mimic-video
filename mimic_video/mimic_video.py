@@ -557,6 +557,7 @@ class MimicVideo(Module):
         prefix_action_chunk = None,
         disable_progress_bar = False,
         predict_num_future_latents = 1,
+        noise_latents = None,
         **kwargs
     ):
         assert predict_num_future_latents > 0
@@ -586,11 +587,14 @@ class MimicVideo(Module):
 
         # noise
 
-        noise = torch.randn((batch_size, *self.action_shape), device = self.device)
+        action_shape = (batch_size, *self.action_shape)
+
+        if not exists(noise_latents):
+            noise_latents = torch.randn(action_shape, device = self.device)
 
         # denoised action starts as noise
 
-        denoised = noise
+        denoised = noise_latents
 
         cache = None
 
@@ -630,6 +634,7 @@ class MimicVideo(Module):
         context_mask = None,
         time = None,                    # () | (b) | (b n)
         time_video_denoise = None,      # override default logit normal sampling for video denoising time
+        noise_latents = None,           # (b na d) - for flow steering
         predict_num_future_latents = 0,
         prompts: list[str] | None = None,
         prompt_token_ids = None,
@@ -746,12 +751,14 @@ class MimicVideo(Module):
             time = torch.rand((batch,), device = device)
             time = self.sample_time_fn(time)
 
-            noise = torch.randn_like(actions)
-            flow = actions - noise
+            if not exists(noise_latents):
+                noise_latents = torch.randn_like(actions)
+
+            flow = actions - noise_latents
 
             actions, left_aligned_time = align_dims_left((actions, time))
 
-            noised = noise.lerp(actions, left_aligned_time)
+            noised = noise_latents.lerp(actions, left_aligned_time)
 
         else:
             noised = actions
