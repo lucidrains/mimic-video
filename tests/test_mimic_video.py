@@ -197,7 +197,7 @@ def test_lora_e2e():
 def test_latent_steering():
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
-    from mimic_video.diffusion_steering import DiffusionSteering
+    from mimic_video.flow_steering import FlowSteering
 
     video_wrapper = CosmosPredictWrapper(
         extract_layer = 1,
@@ -211,37 +211,41 @@ def test_latent_steering():
 
     # wrap model with diffusion steering
 
-    model = DiffusionSteering(model)
+    model = FlowSteering(model)
 
     # states
 
     video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
 
     joint_state = torch.randn(2, 32)
+    rewards = torch.randn(2)
 
     # action
 
     actions = torch.randn(2, 32, 20)
+    noise_latents = torch.randn(2, 32, 20)
 
     # training
 
-    loss = model(
+    loss, (actor_loss, outer_critic_loss, inner_critic_loss) = model(
         prompts = [
             'put the package on the conveyer belt',
             'pass the butter'
         ],
         actions = actions,
+        noise_latents = noise_latents,
         video = video,
         joint_state = joint_state,
         next_video = video,
-        next_joint_state = joint_state
+        next_joint_state = joint_state,
+        rewards = rewards
     )
 
     loss.backward()
 
-    # inference
+    # ... after much training
 
-    actions = model.sample(
+    actions, noise_latents = model.sample(
         prompts = 'peel the orange',
         video = video[:1],
         joint_state = joint_state[:1]

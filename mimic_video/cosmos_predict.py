@@ -196,9 +196,6 @@ class CosmosPredictWrapper(Module):
         self.vae_spatial_compression_ratio = config_v['spatial_compression_ratio']
         self.vae_latent_channels = config_v['latent_channels']
 
-    def __del__(self):
-        for handle in getattr(self, 'hook_handles', []): handle.remove()
-
     def _register_hook(self):
         for layer_index in self.extract_layers:
             target = self.transformer.transformer_blocks[layer_index]

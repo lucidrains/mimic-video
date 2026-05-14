@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 import einx
 from einops import einsum, rearrange, repeat, reduce
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Rearrange, Reduce
 
 from x_mlps_pytorch import create_mlp
 
@@ -130,6 +130,26 @@ class RandomFourierEmbed(Module):
     def forward(self, times):
         rand_proj = self.proj(times)
         return torch.cos(2 * torch.pi * rand_proj)
+
+# regular rmsnorm
+
+class RMSNorm(Module):
+    def __init__(
+        self,
+        dim,
+        **kwargs
+    ):
+        super().__init__()
+        self.norm = nn.RMSNorm(dim, **kwargs)
+
+    def forward(
+        self,
+        tokens,
+        *args,
+        **kwargs
+    ):
+        normed = self.norm(tokens)
+        return normed, 1.
 
 # adaptive rmsnorm
 
@@ -354,6 +374,49 @@ class AttentionAggregatedResidual(Module):
 
         return inverse_pack(pooled, '* d')
 
+# rl related
+
+class Actor(Module):
+    def __init__(
+        self,
+        model: MimicVideo
+    ):
+        super().__init__()
+        self.model = model
+        self.action_queries = nn.Parameter(torch.randn(model.action_chunk_len, model.dim_action))
+
+    def forward(
+        self,
+        *args,
+        joint_state,
+        video = None,
+        **kwargs
+    ):
+        assert 'actions' not in kwargs, 'actions should not be passed into actor'
+
+        batch = joint_state.shape[0]
+
+        queries = repeat(self.action_queries, 'n d -> b n d', b = batch)
+
+        return self.model(
+            *args,
+            joint_state = joint_state,
+            video = video,
+            actions = queries,
+            **kwargs
+        )
+
+class Critic(Module):
+    def __init__(
+        self,
+        model: MimicVideo
+    ):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
 # classes
 
 class MimicVideo(Module):
@@ -373,8 +436,10 @@ class MimicVideo(Module):
         attention_residual_heads = 4,
         attention_residual_dim_head = 64,
         expansion_factor = 4.,
+        is_flow_model = True,
         ada_ln_zero_bias = -5.,
         dim_time_cond = None,
+        pred_head: Module | None = None,
         sample_time_fn = None,
         train_time_rtc = False,
         train_time_rtc_max_delay = None,
@@ -390,6 +455,11 @@ class MimicVideo(Module):
         video_time_denoise_sigma = 1.,
         eps = 1e-5
     ):
+        init_kwargs = locals()
+        init_kwargs.pop('self')
+        init_kwargs.pop('__class__', None)
+        self._init_kwargs = init_kwargs
+
         super().__init__()
 
         self.depth = depth
@@ -438,10 +508,16 @@ class MimicVideo(Module):
 
         self.to_action_tokens = Linear(dim_action, dim)
 
+        # time related, but can be turned off
+
+        self.is_flow_model = is_flow_model
+
         dim_time_cond = default(dim_time_cond, dim * 2)
 
-        self.to_fourier_embed = RandomFourierEmbed(dim) # used by deepmind, its fine
-        self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU())
+        self.to_fourier_embed = RandomFourierEmbed(dim) if is_flow_model else None # used by deepmind, its fine
+        self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU()) if is_flow_model else None
+
+        maybe_adaptive_rmsnorm_klass = partial(AdaptiveRMSNorm, dim_time_cond = dim_time_cond) if is_flow_model else RMSNorm
 
         # joint token related
 
@@ -461,23 +537,24 @@ class MimicVideo(Module):
         layers = []
 
         for _ in range(depth):
-            attn_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
 
             attn = Attention(dim = dim, dim_head = dim_head, heads = heads)
-
-            cross_attn_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond)
-
             cross_attn = Attention(dim = dim, dim_head = dim_head, dim_context = dim_video_hidden, heads = heads, norm_context = True)
-
-            ff_adanorm = AdaptiveRMSNorm(dim = dim, dim_time_cond = dim_time_cond, ada_ln_zero_bias = ada_ln_zero_bias)
-
             ff = SwiGLUFeedForward(dim = dim, expansion_factor = expansion_factor)
+
+            # norms
+
+            attn_adanorm = maybe_adaptive_rmsnorm_klass(dim = dim)
+            cross_attn_adanorm = maybe_adaptive_rmsnorm_klass(dim = dim)
+            ff_adanorm = maybe_adaptive_rmsnorm_klass(dim = dim)
 
             # attention residuals
 
             attn_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
             cross_attn_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
             ff_residual = AttentionAggregatedResidual(dim = dim, heads = attention_residual_heads, dim_head = attention_residual_dim_head)
+
+            # all layers
 
             layers.append(ModuleList([
                 cross_attn_residual,
@@ -497,10 +574,12 @@ class MimicVideo(Module):
 
         # predictions
 
-        self.to_pred = nn.Sequential(
-            nn.RMSNorm(dim),
-            Linear(dim, dim_action, bias = False)
-        )
+        self.final_norm = nn.RMSNorm(dim)
+
+        if not exists(pred_head):
+            pred_head = LinearNoBias(dim, dim_action)
+
+        self.to_pred = pred_head
 
         # inference related
 
@@ -538,6 +617,50 @@ class MimicVideo(Module):
 
         self.video_time_denoise_mu = video_time_denoise_mu
         self.video_time_denoise_sigma = video_time_denoise_sigma
+
+    def create_actor_from(self, **override_model_kwargs):
+        kwargs = self._init_kwargs.copy()
+
+        dim = kwargs['dim']
+        dim_action = kwargs.get('dim_action', self.dim_action)
+
+        pred_head = nn.Sequential(
+            LinearNoBias(dim, dim_action * 2),
+            Rearrange('b n (d c) -> b n d c', c = 2)
+        )
+
+        kwargs.update(
+            is_flow_model = False,
+            model_output_clean = False,
+            pred_head = pred_head,
+            **override_model_kwargs
+        )
+
+        actor_model = MimicVideo(**kwargs)
+        actor_model.load_state_dict(self.state_dict(), strict = False)
+        return Actor(actor_model)
+
+    def create_critic_from(self, **override_model_kwargs):
+        kwargs = self._init_kwargs.copy()
+
+        dim = kwargs['dim']
+
+        pred_head = nn.Sequential(
+            Reduce('b n d -> b d', 'mean'),
+            LinearNoBias(dim, 1),
+            Rearrange('b 1 -> b')
+        )
+
+        kwargs.update(
+            is_flow_model = False,
+            model_output_clean = False,
+            pred_head = pred_head,
+            **override_model_kwargs
+        )
+
+        critic_model = MimicVideo(**kwargs)
+        critic_model.load_state_dict(self.state_dict(), strict = False)
+        return Critic(critic_model)
 
     # only action parameters
 
@@ -624,7 +747,7 @@ class MimicVideo(Module):
     def forward(
         self,
         *,
-        actions,                        # (b na d)
+        actions = None,                 # (b na d)
         joint_state,                    # (b)
         task_ids = None,                # (b)
         advantage_ids = None,           # (b)
@@ -642,8 +765,14 @@ class MimicVideo(Module):
         no_grad_video_model_forward = False,
         cache = None,
         return_cache = False,
-        return_flow = False
+        return_flow = False,
+        return_embed_only = False
     ):
+        is_flow_model = self.is_flow_model
+
+        if not is_flow_model:
+            assert exists(actions), 'actions must be given (queries for actor, actual actions for critic)'
+
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
         assert actions.shape[-2:] == self.action_shape
 
@@ -747,7 +876,7 @@ class MimicVideo(Module):
 
         # handle flow time conditioning
 
-        if is_training:
+        if is_training and is_flow_model:
             time = torch.rand((batch,), device = device)
             time = self.sample_time_fn(time)
 
@@ -763,34 +892,38 @@ class MimicVideo(Module):
         else:
             noised = actions
 
-        # save the action time condition
+        # time may not be present for actor / critic using this backbone
 
-        action_time = time
+        if exists(time):
 
-        if action_time.ndim == 0:
-            action_time = repeat(action_time, ' -> b ', b = batch)
+            # save the action time condition
 
-        # maybe train time rtc
+            action_time = time
 
-        action_loss_mask = None
+            if action_time.ndim == 0:
+                action_time = repeat(action_time, ' -> b ', b = batch)
 
-        if is_training and self.train_time_rtc:
+            # maybe train time rtc
 
-            rand_prefix_len = torch.randint(0, self.train_time_rtc_max_delay, (batch,), device = device)
-            action_prefix_mask = lens_to_mask(rand_prefix_len, self.action_chunk_len)
+            action_loss_mask = None
 
-            actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
-            time = einx.where('b na, , b', action_prefix_mask, 1., time)
+            if is_training and self.train_time_rtc:
 
-            action_loss_mask = ~action_prefix_mask
+                rand_prefix_len = torch.randint(0, self.train_time_rtc_max_delay, (batch,), device = device)
+                action_prefix_mask = lens_to_mask(rand_prefix_len, self.action_chunk_len)
 
-        if time.ndim == 0:
-            time = repeat(time, '-> b', b = batch)
+                actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
+                time = einx.where('b na, , b', action_prefix_mask, 1., time)
 
-        if time.ndim == 2:
-            time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = time.shape[-1])
+                action_loss_mask = ~action_prefix_mask
 
-        times = stack((time, time_video_denoise), dim = -1)
+            if time.ndim == 0:
+                time = repeat(time, '-> b', b = batch)
+
+            if time.ndim == 2:
+                time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = time.shape[-1])
+
+            times = stack((time, time_video_denoise), dim = -1)
 
         # embed
 
@@ -845,18 +978,22 @@ class MimicVideo(Module):
 
         # determine time - need to handle the sequence dimension given train time RTC and various conditioning tokens
 
-        if times.ndim == 3:
-            joint_task_advantage_times = 1 + int(exists(advantage_ids)) + int(exists(task_ids))
+        time_cond = None
 
-            times = pad_at_dim(times, (joint_task_advantage_times, 0), dim = 1, value = 1.) # handle joint state token on the action
+        if exists(time):
+            if times.ndim == 3:
+                joint_task_advantage_times = 1 + int(exists(advantage_ids)) + int(exists(task_ids))
 
-        # fourier embed and mlp to time condition
+                times = pad_at_dim(times, (joint_task_advantage_times, 0), dim = 1, value = 1.) # handle joint state token on the action
 
-        fourier_embed = self.to_fourier_embed(times)
+            # fourier embed and mlp to time condition
 
-        fourier_embed = rearrange(fourier_embed, '... times d -> ... (times d)')
+            if is_flow_model:
+                fourier_embed = self.to_fourier_embed(times)
 
-        time_cond = self.to_time_cond(fourier_embed)
+                fourier_embed = rearrange(fourier_embed, '... times d -> ... (times d)')
+
+                time_cond = self.to_time_cond(fourier_embed)
 
         # pack with action tokens for attention tower
 
@@ -900,6 +1037,7 @@ class MimicVideo(Module):
             branch_tokens, gate = attn_norm(tokens, time_cond)
 
             attn_out, self_kv = attn(branch_tokens, kv = cached_self_kv, return_kv = True)
+
             layer_outputs.append(attn_out * gate)
 
             if return_cache:
@@ -931,9 +1069,21 @@ class MimicVideo(Module):
 
         *_, tokens = inverse_pack(tokens)
 
+        # embed
+
+        embed = self.final_norm(tokens)
+
+        if return_embed_only:
+            return embed
+
         # prediction
 
-        pred = self.to_pred(tokens)
+        pred = self.to_pred(embed)
+
+        # if being used for actor / critic, then just return the prediction
+
+        if not is_flow_model:
+            return pred
 
         # convert to flow if outputting in x0 space
 
