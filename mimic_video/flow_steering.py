@@ -36,9 +36,12 @@ def get_discounted_returns(
 
         return rewards + discount_factor * last_q
 
+    max_n_steps = rewards.shape[-1]
+
     if exists(done):
+        assert done.shape == rewards.shape
         n_step_lens = (done.cumsum(dim = -1) == 0).sum(dim = -1) + 1
-        n_step_lens = n_step_lens.clamp(max = done.shape[-1])
+        n_step_lens = n_step_lens.clamp(max = max_n_steps)
 
     last_q = rearrange(last_q, 'b -> b 1')
     inputs = torch.cat((rewards, last_q), dim = -1)
@@ -50,7 +53,6 @@ def get_discounted_returns(
         gates[..., :-1].masked_fill_(done, 0.)
 
     if exists(n_step_lens):
-        max_n_steps = rewards.shape[-1]
         valid_mask = lens_to_mask(n_step_lens, max_n_steps)
         inputs[..., :-1].masked_fill_(~valid_mask, 0.)
         gates[..., :-1].masked_fill_(~valid_mask, 1.)
