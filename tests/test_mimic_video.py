@@ -196,7 +196,8 @@ def test_lora_e2e():
 
 @param('use_minto', (False, True))
 @param('expectile_tau', (0.1, 0.5))
-def test_latent_steering(use_minto, expectile_tau):
+@param('n_step_returns', (False, True))
+def test_latent_steering(use_minto, expectile_tau, n_step_returns):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
     from mimic_video.flow_steering import FlowSteering
@@ -220,7 +221,7 @@ def test_latent_steering(use_minto, expectile_tau):
     video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
 
     joint_state = torch.randn(2, 32)
-    rewards = torch.randn(2)
+    rewards = torch.randn(2, 4) if n_step_returns else torch.randn(2)
 
     # action
 

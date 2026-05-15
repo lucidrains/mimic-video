@@ -6,6 +6,10 @@ from torch.nn import Module
 from mimic_video.mimic_video import MimicVideo
 
 from ema_pytorch import EMA
+from assoc_scan import AssocScan
+
+from einops import rearrange
+from torch_einops_utils import lens_to_mask
 
 # functions
 
@@ -14,6 +18,45 @@ def exists(v):
 
 def default(v, d):
     return v if exists(v) else d
+
+def get_discounted_returns(
+    rewards,  # (b) | (b n_steps)
+    last_q,   # (b)
+    discount_factor,
+    n_step_lens = None, # (b)
+    done = None # (b)
+):
+    # handle no n steps
+
+    if rewards.ndim == 1:
+        if exists(done):
+            last_q = last_q.masked_fill(done, 0.)
+
+        return rewards + discount_factor * last_q
+
+    last_q = rearrange(last_q, 'b -> b 1')
+    inputs = torch.cat((rewards, last_q), dim = -1)
+
+    gates = torch.full_like(inputs, discount_factor)
+    gates[..., -1] = 0.
+
+    if exists(done):
+        gates[..., :-1].masked_fill_(done, 0.)
+
+    if exists(n_step_lens):
+        max_n_steps = rewards.shape[-1]
+        valid_mask = lens_to_mask(n_step_lens, max_n_steps)
+        inputs[..., :-1].masked_fill_(~valid_mask, 0.)
+        gates[..., :-1].masked_fill_(~valid_mask, 1.)
+
+    # parallel scan
+
+    scan = AssocScan(reverse = True)
+    returns = scan(gates, inputs)
+
+    # slice off the bootstrap q value return
+
+    return returns[:, :-1]
 
 # loss related
 
@@ -145,6 +188,8 @@ class FlowSteering(Module):
         next_video,
         next_joint_state,
         rewards, # (b)
+        n_step_lens = None,
+        done = None,
         **kwargs,
     ):
         next_actions, next_noise_latents = self.sample(*args, video = next_video, joint_state = next_joint_state, **kwargs)
@@ -165,7 +210,10 @@ class FlowSteering(Module):
             online_next_pred_q = self.outer_critic(*args, **next_critic_kwargs)
             next_pred_q = torch.minimum(next_pred_q, online_next_pred_q)
 
-        target_q = rewards + self.discount_factor * next_pred_q
+        target_q = get_discounted_returns(rewards, next_pred_q, self.discount_factor, n_step_lens = n_step_lens, done = done)
+
+        if target_q.ndim == 2:
+            target_q = target_q[:, 0]
 
         outer_critic_loss = expectile_l2_loss(
             self.outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs),
