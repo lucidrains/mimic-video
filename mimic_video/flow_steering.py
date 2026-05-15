@@ -26,6 +26,8 @@ def get_discounted_returns(
     n_step_lens = None, # (b)
     done = None # (b)
 ):
+    assert not (exists(n_step_lens) and exists(done)), 'either n_step_lens or done mask given, but not both'
+
     # handle no n steps
 
     if rewards.ndim == 1:
@@ -33,6 +35,10 @@ def get_discounted_returns(
             last_q = last_q.masked_fill(done, 0.)
 
         return rewards + discount_factor * last_q
+
+    if exists(done):
+        n_step_lens = (done.cumsum(dim = -1) == 0).sum(dim = -1) + 1
+        n_step_lens = n_step_lens.clamp(max = done.shape[-1])
 
     last_q = rearrange(last_q, 'b -> b 1')
     inputs = torch.cat((rewards, last_q), dim = -1)
@@ -187,9 +193,9 @@ class FlowSteering(Module):
         noise_latents,
         next_video,
         next_joint_state,
-        rewards, # (b)
-        n_step_lens = None,
-        done = None,
+        rewards,            # (b) | (b n_steps)
+        n_step_lens = None, # (b)
+        done = None,        # (b) | (b n_steps)
         **kwargs,
     ):
         next_actions, next_noise_latents = self.sample(*args, video = next_video, joint_state = next_joint_state, **kwargs)
