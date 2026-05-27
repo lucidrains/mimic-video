@@ -14,6 +14,8 @@ from einops.layers.torch import Rearrange, Reduce
 
 from x_mlps_pytorch import create_mlp
 
+from x_transformers.continuous_autoencoder import ContinuousTransformerAutoencoder
+
 from tqdm import tqdm
 
 from torch_einops_utils import (
@@ -453,6 +455,9 @@ class MimicVideo(Module):
         num_video_viewpoints = 1,
         video_time_denoise_mu = 0.,
         video_time_denoise_sigma = 1.,
+        state_autoencoder: Module | dict | None = None,
+        state_autoencoder_loss_weight = 1.,
+        state_autoencoder_video_layer_index: int | None = None,
         eps = 1e-5
     ):
         init_kwargs = locals()
@@ -618,6 +623,17 @@ class MimicVideo(Module):
         self.video_time_denoise_mu = video_time_denoise_mu
         self.video_time_denoise_sigma = video_time_denoise_sigma
 
+        if isinstance(state_autoencoder, dict):
+            state_autoencoder = ContinuousTransformerAutoencoder(
+                dim = dim_video_hidden,
+                **state_autoencoder
+            )
+
+        self.state_autoencoder = state_autoencoder
+        self.state_autoencoder_loss_weight = state_autoencoder_loss_weight
+
+        self.state_autoencoder_video_layer_index = default(state_autoencoder_video_layer_index, self.extracted_video_layer_indices[depth // 3]) # https://arxiv.org/abs/2602.07050
+
     def create_actor_from(self, **override_model_kwargs):
         kwargs = self._init_kwargs.copy()
 
@@ -743,6 +759,16 @@ class MimicVideo(Module):
             denoised[:, :prefix_len] = prefix_action_chunk
 
         return denoised
+
+    @torch.no_grad()
+    def get_state_tokens(self, video_hiddens):
+        assert exists(self.state_autoencoder)
+        self.eval()
+
+        if isinstance(video_hiddens, list):
+            video_hiddens = video_hiddens[self.state_autoencoder_video_layer_index]
+
+        return self.state_autoencoder.encode(video_hiddens)
 
     def forward(
         self,
@@ -1103,7 +1129,12 @@ class MimicVideo(Module):
 
             flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
 
-            out = masked_mean(flow_loss, action_loss_mask)
+            loss = masked_mean(flow_loss, action_loss_mask)
+
+            if exists(self.state_autoencoder):
+                loss = loss + self.state_autoencoder(video_hiddens[self.state_autoencoder_video_layer_index]) * self.state_autoencoder_loss_weight
+
+            out = loss
 
         if not return_cache:
             return out

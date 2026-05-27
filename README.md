@@ -205,3 +205,27 @@ That's it
     url     = {https://arxiv.org/abs/2406.04081},
 }
 ```
+
+```bibtex
+@misc{xu2026rltokenbootstrappingonline,
+    title   = {RL Token: Bootstrapping Online RL with Vision-Language-Action Models},
+    author  = {Charles Xu and Jost Tobias Springenberg and Michael Equi and Ali Amin and Adnan Esmail and Sergey Levine and Liyiming Ke},
+    year    = {2026},
+    eprint  = {2604.23073},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2604.23073},
+}
+```
+
+```bibtex
+@misc{joseph2026interpretingphysicsvideoworld,
+    title   = {Interpreting Physics in Video World Models},
+    author  = {Sonia Joseph and Quentin Garrido and Randall Balestriero and Matthew Kowal and Thomas Fel and Shahab Bakhtiari and Blake Richards and Mike Rabbat},
+    year    = {2026},
+    eprint  = {2602.07050},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.CV},
+    url     = {https://arxiv.org/abs/2602.07050},
+}
+```

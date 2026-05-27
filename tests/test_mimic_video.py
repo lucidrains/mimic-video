@@ -255,3 +255,38 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns):
     )
 
     assert actions.shape == (1, 32, 20)
+
+def test_state_autoencoder():
+    from mimic_video.mimic_video import MimicVideo
+
+    dim_video_hidden = 77
+    seq_len = 64
+
+    autoencoder_kwargs = dict(
+        enc_depth = 2,
+        dec_depth = 2,
+        max_seq_len = seq_len,
+        dim_latent = 32
+    )
+
+    video_hiddens = torch.randn(2, seq_len, dim_video_hidden)
+    video_mask = torch.randint(0, 2, (2, seq_len)).bool()
+
+    mimic_video = MimicVideo(
+        512,
+        dim_video_hidden = dim_video_hidden,
+        state_autoencoder = autoencoder_kwargs
+    )
+
+    actions = torch.randn(2, 32, 20)
+    joint_state = torch.randn(2, 32)
+
+    forward_kwargs = dict(video_hiddens = video_hiddens, context_mask = video_mask, joint_state = joint_state)
+
+    loss = mimic_video(actions = actions, **forward_kwargs)
+    loss.backward()
+
+    assert loss.numel() == 1
+
+    state_tokens = mimic_video.get_state_tokens(video_hiddens)
+    assert state_tokens.shape == (2, 32)
