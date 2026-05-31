@@ -257,7 +257,7 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns):
     assert actions.shape == (1, 32, 20)
 
 def test_state_autoencoder():
-    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.mimic_video import MimicVideo, exists
 
     dim_video_hidden = 77
     seq_len = 64
@@ -290,3 +290,17 @@ def test_state_autoencoder():
 
     state_tokens = mimic_video.get_state_tokens(video_hiddens)
     assert state_tokens.shape == (2, 32)
+
+    # test return_rl_token during sample
+
+    sampled_actions, rl_token = mimic_video.sample(
+        steps = 2,
+        batch_size = 2,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        return_rl_token = True,
+        disable_progress_bar = True
+    )
+
+    assert sampled_actions.shape == (2, 32, 20)
+    assert exists(rl_token)

@@ -697,6 +697,7 @@ class MimicVideo(Module):
         disable_progress_bar = False,
         predict_num_future_latents = 1,
         noise_latents = None,
+        return_rl_token = False,
         **kwargs
     ):
         assert predict_num_future_latents > 0
@@ -758,7 +759,14 @@ class MimicVideo(Module):
         if inpainting:
             denoised[:, :prefix_len] = prefix_action_chunk
 
-        return denoised
+        if not return_rl_token:
+            return denoised
+
+        assert exists(self.state_autoencoder)
+
+        rl_token = self.get_state_tokens(cache.video_hiddens)
+
+        return denoised, rl_token
 
     @torch.no_grad()
     def get_state_tokens(self, video_hiddens):
