@@ -3,7 +3,7 @@ from functools import partial
 from collections import namedtuple
 
 import torch
-from torch import nn, cat, stack, is_tensor, tensor
+from torch import nn, cat, stack, is_tensor, tensor, Tensor
 from torch.nn import Module, ModuleList, Linear, GRU
 
 import torch.nn.functional as F
@@ -153,6 +153,20 @@ class RMSNorm(Module):
         normed = self.norm(tokens)
         return normed, 1.
 
+# layer scale
+
+class LayerScale(Module):
+    def __init__(
+        self,
+        dim,
+        init = 1e-5
+    ):
+        super().__init__()
+        self.scale = nn.Parameter(torch.full((dim,), init))
+
+    def forward(self, x):
+        return x * self.scale
+
 # adaptive rmsnorm
 
 class AdaptiveRMSNorm(Module):
@@ -197,6 +211,8 @@ class AdaptiveRMSNorm(Module):
 # attention
 
 Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len', 'video_hiddens'])
+Losses = namedtuple('Losses', ['flow', 'state_autoencoder', 'joint_latent_dynamics'])
+Intermediates = namedtuple('Intermediates', ['cache', 'joint_state_latent', 'losses'])
 
 class Attention(Module):
     def __init__(
@@ -458,6 +474,8 @@ class MimicVideo(Module):
         state_autoencoder: Module | dict | None = None,
         state_autoencoder_loss_weight = 1.,
         state_autoencoder_video_layer_index: int | None = None,
+        has_joint_latent_dynamics = False,
+        joint_latent_dynamics_loss_weight = 1.,
         eps = 1e-5
     ):
         init_kwargs = locals()
@@ -634,6 +652,18 @@ class MimicVideo(Module):
 
         self.state_autoencoder_video_layer_index = default(state_autoencoder_video_layer_index, self.extracted_video_layer_indices[depth // 3]) # https://arxiv.org/abs/2602.07050
 
+        # joint latent dynamics
+
+        self.has_joint_latent_dynamics = has_joint_latent_dynamics
+        self.joint_latent_dynamics_loss_weight = joint_latent_dynamics_loss_weight
+
+        if has_joint_latent_dynamics:
+            self.joint_latent_dynamics_residual = nn.Sequential(
+                nn.LayerNorm(dim),
+                create_mlp(dim, depth = 3),
+                LayerScale(dim)
+            )
+
     def create_actor_from(self, **override_model_kwargs):
         kwargs = self._init_kwargs.copy()
 
@@ -736,7 +766,7 @@ class MimicVideo(Module):
 
         denoised = noise_latents
 
-        cache = None
+        intermediates = None
 
         # denoise
 
@@ -745,7 +775,7 @@ class MimicVideo(Module):
             if inpainting:
                 denoised[:, :prefix_len] = maybe_normed_prefix
 
-            pred_flow, cache = self.forward(actions = denoised, time = time, cache = cache, predict_num_future_latents = predict_num_future_latents, return_cache = True, **kwargs)
+            pred_flow, intermediates = self.forward(actions = denoised, time = time, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
@@ -764,7 +794,7 @@ class MimicVideo(Module):
 
         assert exists(self.state_autoencoder)
 
-        rl_token = self.get_state_tokens(cache.video_hiddens)
+        rl_token = self.get_state_tokens(intermediates.cache.video_hiddens)
 
         return denoised, rl_token
 
@@ -797,8 +827,10 @@ class MimicVideo(Module):
         prompt_token_ids = None,
         detach_video_hiddens = False,
         no_grad_video_model_forward = False,
+        next_joint_state_latent = None,
+        intermediates = None,
         cache = None,
-        return_cache = False,
+        return_intermediates = False,
         return_flow = False,
         return_embed_only = False
     ):
@@ -901,6 +933,9 @@ class MimicVideo(Module):
 
         # handle caching
 
+        if exists(intermediates):
+            cache = default(cache, intermediates.cache)
+
         prev_self_kv, prev_gru_hidden, prev_seq_len, cached_video_hiddens = cache if exists(cache) else ((None,) * self.depth, None, 0, None)
 
         if exists(cached_video_hiddens):
@@ -910,9 +945,14 @@ class MimicVideo(Module):
 
         # handle flow time conditioning
 
+        if exists(time) and isinstance(time, (int, float)):
+            time = torch.full_like(actions[:, 0, 0], time)
+
         if is_training and is_flow_model:
-            time = torch.rand((batch,), device = device)
-            time = self.sample_time_fn(time)
+
+            if not exists(time):
+                time = torch.rand((batch,), device = device)
+                time = self.sample_time_fn(time)
 
             if not exists(noise_latents):
                 noise_latents = torch.randn_like(actions)
@@ -1074,7 +1114,7 @@ class MimicVideo(Module):
 
             layer_outputs.append(attn_out * gate)
 
-            if return_cache:
+            if return_intermediates:
                 next_cached_self_attn_kv.append(self_kv)
 
             # prepare feedforward
@@ -1101,11 +1141,12 @@ class MimicVideo(Module):
 
         # remove joint token
 
-        *_, tokens = inverse_pack(tokens)
+        *_, joint_token_out, tokens = inverse_pack(tokens)
 
         # embed
 
         embed = self.final_norm(tokens)
+        joint_state_latent = self.final_norm(joint_token_out)
 
         if return_embed_only:
             return embed
@@ -1128,6 +1169,8 @@ class MimicVideo(Module):
 
         # handle maybe loss or returning flow for inference
 
+        losses = None
+
         if not is_training:
             # flow
 
@@ -1136,17 +1179,32 @@ class MimicVideo(Module):
             # mse flow loss
 
             flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
+            flow_loss = masked_mean(flow_loss, action_loss_mask)
 
-            loss = masked_mean(flow_loss, action_loss_mask)
+            state_autoencoder_loss = joint_latent_dynamics_loss = self.zero
 
             if exists(self.state_autoencoder):
-                loss = loss + self.state_autoencoder(video_hiddens[self.state_autoencoder_video_layer_index]) * self.state_autoencoder_loss_weight
+                state_autoencoder_loss = self.state_autoencoder(video_hiddens[self.state_autoencoder_video_layer_index])
 
-            out = loss
+            if self.has_joint_latent_dynamics and exists(next_joint_state_latent):
+                pred_next_joint_state_latent = joint_state_latent + self.joint_latent_dynamics_residual(joint_state_latent)
+                joint_latent_dynamics_loss = F.smooth_l1_loss(pred_next_joint_state_latent, next_joint_state_latent.detach())
 
-        if not return_cache:
+            total_loss = (
+                flow_loss +
+                state_autoencoder_loss * self.state_autoencoder_loss_weight +
+                joint_latent_dynamics_loss * self.joint_latent_dynamics_loss_weight
+            )
+
+            losses = Losses(flow_loss, state_autoencoder_loss, joint_latent_dynamics_loss)
+
+            out = total_loss
+
+        if not return_intermediates:
             return out
 
-        # handle returning of cache
+        # handle returning of intermediates
 
-        return out, Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1], video_hiddens)
+        cache = Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1], video_hiddens)
+
+        return out, Intermediates(cache, joint_state_latent, losses)

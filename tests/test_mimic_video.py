@@ -304,3 +304,48 @@ def test_state_autoencoder():
 
     assert sampled_actions.shape == (2, 32, 20)
     assert exists(rl_token)
+
+def test_joint_latent_dynamics():
+    from mimic_video.mimic_video import MimicVideo
+
+    mimic_video = MimicVideo(
+        dim = 512,
+        dim_video_hidden = 77,
+        has_joint_latent_dynamics = True
+    )
+
+    video_hiddens = torch.randn(2, 64, 77)
+    video_mask = torch.ones((2, 64)).bool()
+
+    actions = torch.randn(2, 32, 20)
+    joint_state = torch.randn(2, 32)
+    next_joint_state = torch.randn(2, 32)
+
+    # 1. get the target latent from the next state at time = 0
+
+    _, intermediates = mimic_video(
+        actions = actions,
+        video_hiddens = video_hiddens,
+        context_mask = video_mask,
+        joint_state = next_joint_state,
+        return_intermediates = True,
+        time = 0
+    )
+
+    next_joint_state_latent = intermediates.joint_state_latent
+
+    # 2. train the current state using the target latent
+
+    loss, intermediates = mimic_video(
+        actions = actions,
+        video_hiddens = video_hiddens,
+        context_mask = video_mask,
+        joint_state = joint_state,
+        next_joint_state_latent = next_joint_state_latent,
+        return_intermediates = True
+    )
+
+    loss.backward()
+
+    assert loss.numel() == 1
+    assert intermediates.losses.joint_latent_dynamics > 0.
