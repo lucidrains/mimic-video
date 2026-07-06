@@ -16,6 +16,25 @@ Implementation of [Mimic-Video](https://mimic-video.github.io/), Video-Action Mo
 $ pip install mimic-video
 ```
 
+## Device Support
+
+The model is device-agnostic and works on CPU, NVIDIA CUDA, and Intel XPU (integrated and discrete GPUs). Use `.to(device)` on both the model and inputs:
+
+```python
+# Intel XPU
+device = 'xpu'
+
+# NVIDIA CUDA
+# device = 'cuda'
+
+model = model.to(device)
+video = video.to(device)
+joint_state = joint_state.to(device)
+actions = actions.to(device)
+```
+
+
+
 ## Usage
 
 ```python

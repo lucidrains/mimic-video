@@ -349,3 +349,94 @@ def test_joint_latent_dynamics():
 
     assert loss.numel() == 1
     assert intermediates.losses.joint_latent_dynamics > 0.
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="XPU not available")
+def test_xpu_forward_and_sample():
+    from mimic_video.mimic_video import MimicVideo
+
+    device = torch.device('xpu')
+
+    torch.manual_seed(42)
+    video_hiddens = torch.randn(2, 64, 77)
+    video_mask = torch.randint(0, 2, (2, 64)).bool()
+    actions = torch.randn(2, 32, 20)
+    joint_state = torch.randn(2, 32)
+    time = torch.tensor([0.5, 0.5])
+
+    # CPU model (eval for deterministic comparison)
+    torch.manual_seed(42)
+    model_cpu = MimicVideo(512, dim_video_hidden=77).eval()
+
+    # XPU model with identical weights
+    torch.manual_seed(42)
+    model_xpu = MimicVideo(512, dim_video_hidden=77).to(device).eval()
+
+    # deterministic forward (time given → no random noise)
+    with torch.no_grad():
+        flow_cpu = model_cpu(
+            actions=actions, video_hiddens=video_hiddens, context_mask=video_mask,
+            joint_state=joint_state, time=time, return_flow=True,
+        )
+        flow_xpu = model_xpu(
+            actions=actions.to(device), video_hiddens=video_hiddens.to(device),
+            context_mask=video_mask.to(device), joint_state=joint_state.to(device),
+            time=time.to(device), return_flow=True,
+        )
+        torch.xpu.synchronize()
+
+    assert flow_xpu.shape == flow_cpu.shape
+    assert flow_xpu.device.type == 'xpu'
+    mse = ((flow_cpu - flow_xpu.cpu()) ** 2).mean().item()
+    assert mse < 1e-5, f"CPU vs XPU MSE too high: {mse}"
+
+    # backward pass on XPU
+    loss = model_xpu(
+        actions=actions.to(device), video_hiddens=video_hiddens.to(device),
+        context_mask=video_mask.to(device), joint_state=joint_state.to(device),
+    )
+    loss.backward()
+    torch.xpu.synchronize()
+    assert loss.numel() == 1
+    assert loss.device.type == 'xpu'
+
+    # sample on XPU
+    sampled = model_xpu.sample(
+        steps=4, batch_size=1,
+        joint_state=joint_state.to(device)[:1],
+        video_hiddens=video_hiddens.to(device)[:1],
+        context_mask=video_mask.to(device)[:1],
+        disable_progress_bar=True,
+    )
+    torch.xpu.synchronize()
+    assert sampled.shape == (1, 32, 20)
+    assert sampled.device.type == 'xpu'
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="XPU not available")
+def test_xpu_e2e():
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.cosmos_predict import CosmosPredictWrapper
+
+    device = torch.device('xpu')
+
+    video_wrapper = CosmosPredictWrapper(extract_layer=1, random_weights=True, tiny=True)
+    model = MimicVideo(512, video_wrapper, depth=3).to(device)
+
+    video = torch.rand(1, 5, 3, 32, 32).to(device)
+    actions = torch.randn(1, 32, 20).to(device)
+    joint_state = torch.randn(1, 32).to(device)
+
+    # forward + backward
+    loss = model(video=video, actions=actions, joint_state=joint_state,
+                 prompts='put the package on the conveyer belt')
+    loss.backward()
+    torch.xpu.synchronize()
+    assert loss.device.type == 'xpu'
+
+    # sample
+    pred = model.sample(video=video, joint_state=joint_state,
+                        prompts='pass the butter', disable_progress_bar=True)
+    torch.xpu.synchronize()
+    assert pred.shape == (1, 32, 20)
+    assert pred.device.type == 'xpu'
