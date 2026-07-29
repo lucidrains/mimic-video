@@ -476,6 +476,7 @@ class MimicVideo(Module):
         state_autoencoder_video_layer_index: int | None = None,
         has_joint_latent_dynamics = False,
         joint_latent_dynamics_loss_weight = 1.,
+        num_register_tokens = 0,
         eps = 1e-5
     ):
         init_kwargs = locals()
@@ -527,9 +528,14 @@ class MimicVideo(Module):
 
         self.sample_time_fn = default(sample_time_fn, default_sample_time_fn)
 
-        # embed
-
         self.to_action_tokens = Linear(dim_action, dim)
+
+        # register tokens
+
+        self.num_register_tokens = num_register_tokens
+        self.has_register_tokens = num_register_tokens > 0
+
+        self.register_tokens = nn.Parameter(torch.randn(num_register_tokens, dim) * 0.02) if self.has_register_tokens else None
 
         # time related, but can be turned off
 
@@ -1008,6 +1014,13 @@ class MimicVideo(Module):
 
         empty_token = tokens[:, 0:0]
 
+        # register tokens
+
+        register_tokens = empty_token
+
+        if self.has_register_tokens:
+            register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = batch)
+
         # one layer of rnn for actions
 
         rnn_out, gru_hidden = self.rnn(tokens, prev_gru_hidden)
@@ -1057,9 +1070,9 @@ class MimicVideo(Module):
 
         if exists(time):
             if times.ndim == 3:
-                joint_task_advantage_times = 1 + int(exists(advantage_ids)) + int(exists(task_ids))
+                prefix_len = 1 + int(exists(advantage_ids)) + int(exists(task_ids)) + self.num_register_tokens
 
-                times = pad_at_dim(times, (joint_task_advantage_times, 0), dim = 1, value = 1.) # handle joint state token on the action
+                times = pad_at_dim(times, (prefix_len, 0), dim = 1, value = 1.) # handle joint state token on the action
 
             # fourier embed and mlp to time condition
 
@@ -1072,7 +1085,7 @@ class MimicVideo(Module):
 
         # pack with action tokens for attention tower
 
-        tokens, inverse_pack = pack_with_inverse((advantage_embed, task_embed, joint_state_token, tokens), 'b * d')
+        tokens, inverse_pack = pack_with_inverse((advantage_embed, task_embed, joint_state_token, register_tokens, tokens), 'b * d')
 
         # transformer layers
 
@@ -1140,9 +1153,9 @@ class MimicVideo(Module):
 
         tokens = self.final_attn_agg(layer_outputs)
 
-        # remove joint token
+        # remove joint token and register tokens
 
-        *_, joint_token_out, tokens = inverse_pack(tokens)
+        _, _, joint_token_out, _, tokens = inverse_pack(tokens)
 
         # embed
 

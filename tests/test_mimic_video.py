@@ -412,3 +412,26 @@ def test_mimic_video_unreduced_loss():
 
     assert loss_reduced.ndim == 0
     assert torch.allclose(loss_unreduced.mean(), loss_reduced, atol = 1e-4)
+
+@param('num_registers', (0, 4))
+def test_register_tokens(num_registers):
+    from mimic_video.mimic_video import MimicVideo
+
+    model = MimicVideo(
+        dim = 256,
+        dim_video_hidden = 64,
+        num_register_tokens = num_registers
+    )
+
+    actions = torch.randn(2, 32, 20)
+    joint_state = torch.randn(2, 32)
+    video_hiddens = torch.randn(2, 16, 64)
+
+    loss = model(actions = actions, joint_state = joint_state, video_hiddens = video_hiddens)
+    loss.backward()
+
+    flow = model(actions = actions, joint_state = joint_state, video_hiddens = video_hiddens, time = torch.tensor([0.5, 0.5]))
+    assert flow.shape == actions.shape
+
+    sampled = model.sample(batch_size = 2, joint_state = joint_state, video_hiddens = video_hiddens)
+    assert sampled.shape == (2, 32, 20)
