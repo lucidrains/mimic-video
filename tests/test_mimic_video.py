@@ -349,3 +349,66 @@ def test_joint_latent_dynamics():
 
     assert loss.numel() == 1
     assert intermediates.losses.joint_latent_dynamics > 0.
+
+def test_mimic_video_unreduced_loss():
+    from mimic_video.mimic_video import MimicVideo
+
+    batch_size = 4
+    mimic_video = MimicVideo(
+        dim = 512,
+        dim_video_hidden = 77,
+        has_joint_latent_dynamics = True
+    )
+
+    video_hiddens = torch.randn(batch_size, 64, 77)
+    video_mask = torch.ones((batch_size, 64)).bool()
+
+    actions = torch.randn(batch_size, 32, 20)
+    joint_state = torch.randn(batch_size, 32)
+    next_joint_state = torch.randn(batch_size, 32)
+
+    # get next joint state latent
+    _, intermediates = mimic_video(
+        actions = actions,
+        video_hiddens = video_hiddens,
+        context_mask = video_mask,
+        joint_state = next_joint_state,
+        return_intermediates = True,
+        time = 0
+    )
+    next_joint_state_latent = intermediates.joint_state_latent
+
+    noise_latents = torch.randn_like(actions)
+
+    # 1. unreduced loss
+    torch.manual_seed(42)
+    loss_unreduced, intermediates_unreduced = mimic_video(
+        actions = actions,
+        video_hiddens = video_hiddens,
+        context_mask = video_mask,
+        joint_state = joint_state,
+        next_joint_state_latent = next_joint_state_latent,
+        noise_latents = noise_latents,
+        return_unreduced_loss = True,
+        return_intermediates = True
+    )
+
+    assert loss_unreduced.shape == (batch_size,)
+    assert intermediates_unreduced.losses.flow.shape == (batch_size,)
+    assert intermediates_unreduced.losses.joint_latent_dynamics.shape == (batch_size,)
+
+    # 2. reduced loss
+    torch.manual_seed(42)
+    loss_reduced, intermediates_reduced = mimic_video(
+        actions = actions,
+        video_hiddens = video_hiddens,
+        context_mask = video_mask,
+        joint_state = joint_state,
+        next_joint_state_latent = next_joint_state_latent,
+        noise_latents = noise_latents,
+        return_unreduced_loss = False,
+        return_intermediates = True
+    )
+
+    assert loss_reduced.ndim == 0
+    assert torch.allclose(loss_unreduced.mean(), loss_reduced, atol = 1e-4)

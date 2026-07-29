@@ -828,6 +828,7 @@ class MimicVideo(Module):
         detach_video_hiddens = False,
         no_grad_video_model_forward = False,
         next_joint_state_latent = None,
+        return_unreduced_loss = False,
         intermediates = None,
         cache = None,
         return_intermediates = False,
@@ -1176,25 +1177,50 @@ class MimicVideo(Module):
 
             out = pred_flow
         else:
-            # mse flow loss
+            reduce_loss_dim = slice(1, None) if return_unreduced_loss else None
 
             flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
-            flow_loss = masked_mean(flow_loss, action_loss_mask)
+            flow_loss = masked_mean(flow_loss, action_loss_mask, dim = reduce_loss_dim)
 
-            state_autoencoder_loss = joint_latent_dynamics_loss = self.zero
+            # handle no loss
+
+            zero = self.zero
+
+            if return_unreduced_loss:
+                zero = repeat(zero, '-> b', b = batch)
+
+            state_autoencoder_loss = joint_latent_dynamics_loss = zero
+
+            # for the rl token
 
             if exists(self.state_autoencoder):
-                state_autoencoder_loss = self.state_autoencoder(video_hiddens[self.state_autoencoder_video_layer_index])
+                state_autoencoder_loss = self.state_autoencoder(
+                    video_hiddens[self.state_autoencoder_video_layer_index],
+                    return_unreduced_loss = return_unreduced_loss
+                )
+
+            # for next latent prediction on proprioception token, which would have absorbed the state as well
 
             if self.has_joint_latent_dynamics and exists(next_joint_state_latent):
                 pred_next_joint_state_latent = joint_state_latent + self.joint_latent_dynamics_residual(joint_state_latent)
-                joint_latent_dynamics_loss = F.smooth_l1_loss(pred_next_joint_state_latent, next_joint_state_latent.detach())
+
+                joint_latent_dynamics_loss = F.smooth_l1_loss(
+                    pred_next_joint_state_latent,
+                    next_joint_state_latent.detach(),
+                    reduction = 'none'
+                )
+
+                joint_latent_dynamics_loss = masked_mean(joint_latent_dynamics_loss, dim = reduce_loss_dim)
+
+            # total loss
 
             total_loss = (
                 flow_loss +
                 state_autoencoder_loss * self.state_autoencoder_loss_weight +
                 joint_latent_dynamics_loss * self.joint_latent_dynamics_loss_weight
             )
+
+            # loss breakdown
 
             losses = Losses(flow_loss, state_autoencoder_loss, joint_latent_dynamics_loss)
 
