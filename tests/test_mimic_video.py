@@ -435,3 +435,49 @@ def test_register_tokens(num_registers):
 
     sampled = model.sample(batch_size = 2, joint_state = joint_state, video_hiddens = video_hiddens)
     assert sampled.shape == (2, 32, 20)
+
+@param('explore_candidates', (1, 4))
+def test_explorative_modeling(explore_candidates):
+    from mimic_video.mimic_video import MimicVideo
+
+    model = MimicVideo(
+        dim = 256,
+        dim_video_hidden = 64,
+        explore_candidates = explore_candidates,
+        has_joint_latent_dynamics = True
+    )
+
+    batch_size = 2
+    actions = torch.randn(batch_size, 32, 20)
+    joint_state = torch.randn(batch_size, 32)
+    video_hiddens = torch.randn(batch_size, 16, 64)
+    next_joint_state_latent = torch.randn(batch_size, 256)
+
+    loss = model(
+        actions = actions,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        next_joint_state_latent = next_joint_state_latent
+    )
+    loss.backward()
+    assert loss.numel() == 1
+
+    loss_unreduced = model(
+        actions = actions,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        next_joint_state_latent = next_joint_state_latent,
+        return_unreduced_loss = True
+    )
+    assert loss_unreduced.shape == (batch_size,)
+
+    loss_override = model(
+        actions = actions,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        explore_candidates = 4
+    )
+    assert loss_override.numel() == 1
+
+    sampled = model.sample(batch_size = batch_size, joint_state = joint_state, video_hiddens = video_hiddens)
+    assert sampled.shape == (batch_size, 32, 20)

@@ -25,6 +25,7 @@ from torch_einops_utils import (
     pad_at_dim,
     pack_with_inverse,
     masked_mean,
+    batched_index_select,
     tree_map_tensor
 )
 
@@ -175,7 +176,7 @@ class AdaptiveRMSNorm(Module):
         dim,
         dim_time_cond,
         eps = 1e-6,
-        ada_ln_zero_bias = -5.
+        ada_ln_zero_bias = -2.
     ):
         super().__init__()
         self.scale = dim ** 0.5
@@ -455,7 +456,7 @@ class MimicVideo(Module):
         attention_residual_dim_head = 64,
         expansion_factor = 4.,
         is_flow_model = True,
-        ada_ln_zero_bias = -5.,
+        ada_ln_zero_bias = -2.,
         dim_time_cond = None,
         pred_head: Module | None = None,
         sample_time_fn = None,
@@ -477,6 +478,7 @@ class MimicVideo(Module):
         has_joint_latent_dynamics = False,
         joint_latent_dynamics_loss_weight = 1.,
         num_register_tokens = 0,
+        explore_candidates = 1,
         eps = 1e-5
     ):
         init_kwargs = locals()
@@ -546,7 +548,7 @@ class MimicVideo(Module):
         self.to_fourier_embed = RandomFourierEmbed(dim) if is_flow_model else None # used by deepmind, its fine
         self.to_time_cond = create_mlp(dim_in = dim * 2, dim = dim_time_cond, depth = 2, activation = nn.SiLU()) if is_flow_model else None
 
-        maybe_adaptive_rmsnorm_klass = partial(AdaptiveRMSNorm, dim_time_cond = dim_time_cond) if is_flow_model else RMSNorm
+        maybe_adaptive_rmsnorm_klass = partial(AdaptiveRMSNorm, dim_time_cond = dim_time_cond, ada_ln_zero_bias = ada_ln_zero_bias) if is_flow_model else RMSNorm
 
         # joint token related
 
@@ -669,6 +671,11 @@ class MimicVideo(Module):
                 create_mlp(dim, depth = 3),
                 LayerScale(dim)
             )
+
+        # explorative modeling - https://arxiv.org/abs/2607.27372
+
+        assert explore_candidates >= 1, 'explore_candidates must be at least 1'
+        self.explore_candidates = explore_candidates
 
     def create_actor_from(self, **override_model_kwargs):
         kwargs = self._init_kwargs.copy()
@@ -827,7 +834,7 @@ class MimicVideo(Module):
         context_mask = None,
         time = None,                    # () | (b) | (b n)
         time_video_denoise = None,      # override default logit normal sampling for video denoising time
-        noise_latents = None,           # (b na d) - for flow steering
+        noise_latents = None,           # (b na d) or (b k na d) - for flow steering or explorative modeling
         predict_num_future_latents = 0,
         prompts: list[str] | None = None,
         prompt_token_ids = None,
@@ -839,7 +846,8 @@ class MimicVideo(Module):
         cache = None,
         return_intermediates = False,
         return_flow = False,
-        return_embed_only = False
+        return_embed_only = False,
+        explore_candidates: int | None = None
     ):
         is_flow_model = self.is_flow_model
 
@@ -852,10 +860,26 @@ class MimicVideo(Module):
         if exists(self.action_normalizer):
             actions = self.action_normalizer.normalize(actions)
 
-        batch, device = actions.shape[0], actions.device
+        batch, seq_len, device = actions.shape[0], actions.shape[1], actions.device
         orig_actions = actions
 
         is_training = not exists(time) and not return_flow
+
+        # explorative modeling related
+
+        explore_candidates = default(explore_candidates, self.explore_candidates)
+
+        if not (is_training and is_flow_model):
+            explore_candidates = 1
+
+        is_explorative = explore_candidates > 1
+
+        def expand_candidates(t):
+            if not is_explorative:
+                return t
+            return tree_map_tensor(partial(repeat, pattern = 'b ... -> (b k) ...', k = explore_candidates), t)
+
+        split_candidates = partial(rearrange, pattern = '(b k) ... -> b k ...', k = explore_candidates)
 
         # handle multi-view
 
@@ -933,10 +957,34 @@ class MimicVideo(Module):
             # handle video hiddens
 
             if detach_video_hiddens:
-                video_hiddens = video_hiddens.detach()
+                video_hiddens = tree_map_tensor(lambda t: t.detach(), video_hiddens)
 
             if not isinstance(video_hiddens, list):
                 video_hiddens = [video_hiddens]
+
+        # repeat inputs for explorative candidates if enabled
+
+        (
+            actions,
+            orig_actions,
+            joint_state,
+            task_ids,
+            advantage_ids,
+            context_mask,
+            video_hiddens,
+            time_video_denoise,
+            next_joint_state_latent
+        ) = expand_candidates((
+            actions,
+            orig_actions,
+            joint_state,
+            task_ids,
+            advantage_ids,
+            context_mask,
+            video_hiddens,
+            time_video_denoise,
+            next_joint_state_latent
+        ))
 
         # handle caching
 
@@ -961,8 +1009,14 @@ class MimicVideo(Module):
                 time = torch.rand((batch,), device = device)
                 time = self.sample_time_fn(time)
 
+            time = expand_candidates(time)
+
             if not exists(noise_latents):
                 noise_latents = torch.randn_like(actions)
+            elif noise_latents.ndim == 4:
+                noise_latents = rearrange(noise_latents, 'b k ... -> (b k) ...')
+            else:
+                noise_latents = expand_candidates(noise_latents)
 
             flow = actions - noise_latents
 
@@ -991,6 +1045,8 @@ class MimicVideo(Module):
             if is_training and self.train_time_rtc:
 
                 rand_prefix_len = torch.randint(0, self.train_time_rtc_max_delay, (batch,), device = device)
+                rand_prefix_len = expand_candidates(rand_prefix_len)
+
                 action_prefix_mask = lens_to_mask(rand_prefix_len, self.action_chunk_len)
 
                 actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
@@ -1019,7 +1075,7 @@ class MimicVideo(Module):
         register_tokens = empty_token
 
         if self.has_register_tokens:
-            register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = batch)
+            register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = tokens.shape[0])
 
         # one layer of rnn for actions
 
@@ -1035,6 +1091,7 @@ class MimicVideo(Module):
 
         if self.training and self.has_proprio_masking:
             mask = torch.rand((batch,), device = device) < self.proprio_mask_prob
+            mask = expand_candidates(mask)
 
             joint_state_token = einx.where('b, d, b d', mask, self.proprio_mask_token, joint_state_token)
 
@@ -1190,7 +1247,8 @@ class MimicVideo(Module):
 
             out = pred_flow
         else:
-            reduce_loss_dim = slice(1, None) if return_unreduced_loss else None
+            unreduced_loss = return_unreduced_loss | is_explorative
+            reduce_loss_dim = slice(1, None) if unreduced_loss else None
 
             flow_loss = F.mse_loss(pred_flow, flow, reduction = 'none')
             flow_loss = masked_mean(flow_loss, action_loss_mask, dim = reduce_loss_dim)
@@ -1199,8 +1257,8 @@ class MimicVideo(Module):
 
             zero = self.zero
 
-            if return_unreduced_loss:
-                zero = repeat(zero, '-> b', b = batch)
+            if unreduced_loss:
+                zero = repeat(zero, '-> b', b = actions.shape[0])
 
             state_autoencoder_loss = joint_latent_dynamics_loss = zero
 
@@ -1209,7 +1267,7 @@ class MimicVideo(Module):
             if exists(self.state_autoencoder):
                 state_autoencoder_loss = self.state_autoencoder(
                     video_hiddens[self.state_autoencoder_video_layer_index],
-                    return_unreduced_loss = return_unreduced_loss
+                    return_unreduced_loss = unreduced_loss
                 )
 
             # for next latent prediction on proprioception token, which would have absorbed the state as well
@@ -1225,6 +1283,19 @@ class MimicVideo(Module):
 
                 joint_latent_dynamics_loss = masked_mean(joint_latent_dynamics_loss, dim = reduce_loss_dim)
 
+            # handle explorative modeling candidates if enabled
+
+            if is_explorative:
+                flow_loss_candidates = split_candidates(flow_loss)
+
+                best_candidate_indices = flow_loss_candidates.argmin(dim = -1)
+
+                select_best = lambda t: batched_index_select(split_candidates(t), best_candidate_indices)
+
+                flow_loss = select_best(flow_loss)
+                state_autoencoder_loss = select_best(state_autoencoder_loss)
+                joint_latent_dynamics_loss = select_best(joint_latent_dynamics_loss)
+
             # total loss
 
             total_loss = (
@@ -1232,6 +1303,9 @@ class MimicVideo(Module):
                 state_autoencoder_loss * self.state_autoencoder_loss_weight +
                 joint_latent_dynamics_loss * self.joint_latent_dynamics_loss_weight
             )
+
+            if not return_unreduced_loss:
+                flow_loss, state_autoencoder_loss, joint_latent_dynamics_loss, total_loss = map(torch.mean, (flow_loss, state_autoencoder_loss, joint_latent_dynamics_loss, total_loss))
 
             # loss breakdown
 
@@ -1244,6 +1318,9 @@ class MimicVideo(Module):
 
         # handle returning of intermediates
 
-        cache = Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + noised.shape[1], video_hiddens)
+        if is_explorative:
+            joint_state_latent = select_best(joint_state_latent)
+
+        cache = Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + seq_len, video_hiddens)
 
         return out, Intermediates(cache, joint_state_latent, losses)
