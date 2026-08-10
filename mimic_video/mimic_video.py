@@ -523,7 +523,7 @@ class MimicVideo(Module):
         self.joint_normalizer = None
 
         if exists(joint_mean_std):
-            assert joint_mean_std == (2, dim_joint_state)
+            assert joint_mean_std.shape == (2, dim_joint_state), 'joint_mean_std must have shape of (2, dim_joint_state)'
             self.joint_normalizer = Normalizer(*joint_mean_std)
 
         # flow related
@@ -830,6 +830,7 @@ class MimicVideo(Module):
         advantage_ids = None,           # (b)
         dropout_advantage_ids = False,
         video = None,                   # (b t c h w)
+        audio = None,                   # (b s) | (b c s) - optional audio waveform from minimax h3
         video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
         time = None,                    # () | (b) | (b n)
@@ -891,6 +892,9 @@ class MimicVideo(Module):
 
             video = rearrange(video, 'b v ... -> (b v) ...')
 
+            if exists(audio):
+                audio = repeat(audio, 'b ... -> (b v) ...', v = num_views)
+
             if exists(prompts):
                 if isinstance(prompts, str):
                     prompts = [prompts] * (batch * num_views)
@@ -927,13 +931,17 @@ class MimicVideo(Module):
                 if has_multi_view:
                     video_timestep = repeat(time_video_denoise, 'b -> (b v)', v = num_views)
 
-                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(
-                    video,
+                video_forward_kwargs = dict(
                     prompts = prompts,
                     prompt_token_ids = prompt_token_ids,
                     timestep = video_timestep,
                     predict_num_future_latents = predict_num_future_latents
                 )
+
+                if exists(audio):
+                    video_forward_kwargs.update(audio = audio)
+
+                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, **video_forward_kwargs)
 
                 video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 

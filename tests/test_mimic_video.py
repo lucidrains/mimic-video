@@ -481,3 +481,173 @@ def test_explorative_modeling(explore_candidates):
 
     sampled = model.sample(batch_size = batch_size, joint_state = joint_state, video_hiddens = video_hiddens)
     assert sampled.shape == (batch_size, 32, 20)
+
+def test_minimax_h3_e2e():
+    pytest.importorskip('diffusers.models.transformers.transformer_minimax_h3')
+
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.minimax_h3_predict import MiniMaxH3PredictWrapper
+
+    video_wrapper = MiniMaxH3PredictWrapper(
+        extract_layer = 1,
+        random_weights = True,
+        tiny = True,
+    )
+
+    model = MimicVideo(512, video_wrapper)
+
+    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+
+    joint_state = torch.randn(2, 32)
+
+    actions = torch.randn(2, 32, 20)
+
+    loss = model(
+        prompts = [
+            'put the package on the conveyer belt',
+            'pass the butter'
+        ],
+        video = video,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+
+    assert loss.numel() == 1
+
+    # multi-layer extraction
+
+    video_wrapper = MiniMaxH3PredictWrapper(
+        extract_layers = [1, 2],
+        random_weights = True,
+        tiny = True,
+    )
+
+    model = MimicVideo(
+        512,
+        video_wrapper,
+        depth = 3,
+        extracted_video_layer_indices = [0, 1, 1]
+    )
+
+    loss = model(
+        prompts = 'put the package on the conveyer belt',
+        video = video,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+
+    assert loss.numel() == 1
+
+    # audio conditioning - stereo waveform along with the video
+
+    audio = torch.randn(2, 2, 8000)
+
+    loss = model(
+        prompts = 'put the package on the conveyer belt',
+        video = video,
+        audio = audio,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+
+    assert loss.numel() == 1
+
+    # inference sampling, which denoises the future latents with a flow ode solve
+
+    pred_actions = model.sample(
+        prompts = 'peel the orange',
+        video = video[:1],
+        audio = audio[:1],
+        joint_state = joint_state[:1]
+    )
+
+    assert pred_actions.shape == (1, 32, 20)
+
+def test_minimax_h3_lora_e2e():
+    pytest.importorskip('diffusers.models.transformers.transformer_minimax_h3')
+
+    import os
+    import shutil
+    from torch.utils.data import Dataset
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.minimax_h3_predict import MiniMaxH3PredictWrapper
+
+    class DummyRobotDataset(Dataset):
+        def __len__(self): return 1
+        def __getitem__(self, _):
+            return torch.rand(9, 3, 32, 32), torch.randn(2, 8000), torch.randint(0, 1000, (32,))
+
+    save_path = './minimax-h3-lora-test'
+    if os.path.exists(save_path):
+        shutil.rmtree(save_path)
+
+    # 1. setup video wrapper and finetune to get a lora, on audio-video pairs
+
+    video_wrapper = MiniMaxH3PredictWrapper(
+        extract_layers = [1, 2],
+        random_weights = True,
+        tiny = True
+    )
+
+    video_wrapper.finetune(
+        DummyRobotDataset(),
+        save_path = save_path,
+        epochs = 1
+    )
+
+    # 2. instantiate new wrapper with the trained lora_path
+
+    lora_wrapper = MiniMaxH3PredictWrapper(
+        extract_layers = [1, 2],
+        random_weights = True,
+        tiny = True,
+        lora_path = save_path
+    )
+
+    # 3. mimic video integration
+
+    model = MimicVideo(
+        dim = 512,
+        video_predict_wrapper = lora_wrapper,
+        depth = 3,
+        extracted_video_layer_indices = [0, 1, 1]
+    )
+
+    # 4. dummy states and actions
+
+    video = torch.rand(1, 5, 3, 32, 32)
+    joint_state = torch.randn(1, 32)
+    actions = torch.randn(1, 32, 20)
+
+    # 5. training forward pass
+
+    loss = model(
+        prompts = 'a task',
+        video = video,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+    assert loss.numel() == 1
+
+    # 6. inference sampling
+
+    sampled_actions = model.sample(
+        prompts = 'the final task',
+        video = video,
+        joint_state = joint_state
+    )
+
+    assert sampled_actions.shape == (1, 32, 20)
+
+    # cleanup
+
+    if os.path.exists(save_path):
+        shutil.rmtree(save_path)

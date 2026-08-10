@@ -73,6 +73,39 @@ actions = model.sample(
 assert actions.shape == (1, 32, 20)
 ```
 
+You can also swap out the video backbone for [MiniMax H3](https://huggingface.co/MiniMaxAI/MiniMax-H3):
+
+```shell
+$ pip install "diffusers@git+https://github.com/huggingface/diffusers.git"
+```
+
+```python
+from mimic_video import MimicVideo, MiniMaxH3PredictWrapper
+
+video_wrapper = MiniMaxH3PredictWrapper(
+    model_name = 'MiniMaxAI/MiniMax-H3',
+    extract_layer = 34
+)
+
+model = MimicVideo(512, video_wrapper)
+```
+
+The wrapper handles Qwen3-VL layer-50 hidden states, packed `[text | audio | video]` sequences with 3D MM-RoPE position grids, rectified-flow velocity timesteps, and flow ODE sampling. LoRA finetuning and fixed prefixing work out of the box.
+
+Microphone audio can also be conditioned alongside video:
+
+```python
+audio = torch.randn(2, 2, 16000) # (batch, channels, samples)
+
+loss = model(
+    prompts = 'pass the butter',
+    video = video,
+    audio = audio,
+    actions = actions,
+    joint_state = joint_state
+)
+```
+
 ## Contributing
 
 First make sure `pytest` and test dependencies are installed with

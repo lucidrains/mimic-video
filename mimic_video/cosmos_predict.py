@@ -13,19 +13,13 @@ from tqdm.auto import tqdm
 from einops import rearrange, repeat
 import einx
 
-from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
-from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
 from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 
 from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean
 
+from mimic_video.utils import exists, default, check_import
+
 # helpers
-
-def exists(v):
-    return v is not None
-
-def default(v, d):
-    return v if exists(v) else d
 
 def cast_tensor(val, device = None):
     return tensor(val, device = device) if not is_tensor(val) else val
@@ -137,6 +131,10 @@ class CosmosPredictWrapper(Module):
         self.hook_handles = []
         self.cached_hidden_states = []
 
+        check_import('diffusers', (0, 32, 0), '`diffusers` must be installed for the Cosmos wrapper - `pip install "diffusers>=0.32"`')
+        check_import('diffusers.models.transformers.transformer_cosmos', None, '`diffusers` must be installed for the Cosmos wrapper - `pip install "diffusers>=0.32"`')
+        check_import('diffusers.models.autoencoders.autoencoder_kl_cosmos', None, '`diffusers` must be installed for the Cosmos wrapper - `pip install "diffusers>=0.32"`')
+
         if random_weights:
             self._init_random_weights(tiny = tiny)
         else:
@@ -181,6 +179,9 @@ class CosmosPredictWrapper(Module):
         del pipeline
 
     def _init_random_weights(self, tiny: bool = False):
+        from diffusers.models.transformers.transformer_cosmos import CosmosTransformer3DModel
+        from diffusers.models.autoencoders.autoencoder_kl_cosmos import AutoencoderKLCosmos
+
         config_t = TINY_TRANSFORMER_CONFIG if tiny else REAL_TRANSFORMER_CONFIG
         config_v = TINY_VAE_CONFIG if tiny else REAL_VAE_CONFIG
         config_5 = TINY_T5_CONFIG if tiny else REAL_T5_CONFIG
@@ -346,7 +347,7 @@ class CosmosPredictWrapper(Module):
                 fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
 
                 fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
-                padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
+                padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
 
             noisy_latents = torch.lerp(latents, noise, padded_timestep)
 
@@ -420,6 +421,9 @@ class CosmosPredictWrapper(Module):
         for epoch in range(epochs):
             pbar = tqdm(dataloader, desc = f"Epoch {epoch}", disable = not accelerator.is_local_main_process)
             for videos, texts in pbar:
+                # clear the hook cache - the transformer forward hooks would otherwise accumulate hidden states across batches
+                self.cached_hidden_states.clear()
+
                 batch = videos.shape[0]
                 videos = self.normalize(videos)
                 videos = rearrange(videos, 'b t c h w -> b c t h w').to(device)
@@ -457,7 +461,7 @@ class CosmosPredictWrapper(Module):
                     fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
 
                     fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
-                    padded_ts = einx.where('b 1 f 1 1, , b 1 f 1 1', fixed_prefix_mask, 0., padded_ts)
+                    padded_ts = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', fixed_prefix_mask, 0., padded_ts)
                     noisy_latents = torch.lerp(latents, noise, padded_ts)
 
                     fixed_prefix_loss_mask = ~fixed_prefix_mask

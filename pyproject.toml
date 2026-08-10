@@ -1,6 +1,6 @@
 [project]
 name = "mimic-video"
-version = "0.3.14"
+version = "0.4.0"
 description = "Mimic Video"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -45,9 +45,9 @@ examples = []
 
 test = [
     "pytest",
+    "accelerate",
     "diffusers>=0.32.0",
     "transformers",
-    "accelerate",
 ]
 
 [tool.pytest.ini_options]
