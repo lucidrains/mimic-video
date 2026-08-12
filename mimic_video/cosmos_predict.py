@@ -318,7 +318,9 @@ class CosmosPredictWrapper(Module):
             if timestep.ndim == 0:
                 timestep = rearrange(timestep, '-> 1')
 
-            if timestep.shape[0] != batch:
+            num_timesteps = timestep.shape[0]
+
+            if num_timesteps != batch:
                 timestep = repeat(timestep, '1 -> b', b = batch)
 
         # use the `predict_num_future_latents` to differentiate between training, where MimicVideo is exposed to varying times for video denoising

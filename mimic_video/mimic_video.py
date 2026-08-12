@@ -26,7 +26,8 @@ from torch_einops_utils import (
     pack_with_inverse,
     masked_mean,
     batched_index_select,
-    tree_map_tensor
+    tree_map_tensor,
+    temp_eval
 )
 
 # ein notation
@@ -63,8 +64,7 @@ def logit_normal_sample(mu, sigma, batch_size, device = None):
 
 def eval_no_grad(fn):
     def inner(*args, **kwargs):
-        with torch.no_grad():
-            fn.eval()
+        with torch.no_grad(), temp_eval(fn):
             return fn(*args, **kwargs)
 
     return inner
@@ -732,6 +732,7 @@ class MimicVideo(Module):
         return self.zero.device
 
     @torch.no_grad()
+    @temp_eval
     def sample(
         self,
         steps = 16,
@@ -741,11 +742,13 @@ class MimicVideo(Module):
         predict_num_future_latents = 1,
         noise_latents = None,
         return_rl_token = False,
+        num_cached_steps = 1,
         **kwargs
     ):
         assert predict_num_future_latents > 0
 
-        self.eval()
+        if return_rl_token:
+            assert num_cached_steps >= 1, '`num_cached_steps` must be at least 1 if `return_rl_token` is given'
 
         inpainting = exists(prefix_action_chunk)
 
@@ -782,13 +785,19 @@ class MimicVideo(Module):
         intermediates = None
 
         # denoise
+        # the kv and gru cache is only accumulated over the very last denoising steps
 
-        for time in tqdm(times, disable = disable_progress_bar):
+        for step_idx, time in enumerate(tqdm(times, disable = disable_progress_bar)):
 
             if inpainting:
                 denoised[:, :prefix_len] = maybe_normed_prefix
 
-            pred_flow, intermediates = self.forward(actions = denoised, time = time, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
+            cache_accumulation_step = step_idx >= (steps - num_cached_steps)
+
+            if cache_accumulation_step:
+                pred_flow, intermediates = self.forward(actions = denoised, time = time, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
+            else:
+                pred_flow = self.forward(actions = denoised, time = time, predict_num_future_latents = predict_num_future_latents, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
@@ -812,9 +821,9 @@ class MimicVideo(Module):
         return denoised, rl_token
 
     @torch.no_grad()
+    @temp_eval
     def get_state_tokens(self, video_hiddens):
         assert exists(self.state_autoencoder)
-        self.eval()
 
         if isinstance(video_hiddens, list):
             video_hiddens = video_hiddens[self.state_autoencoder_video_layer_index]
@@ -902,7 +911,8 @@ class MimicVideo(Module):
                     prompts = [p for p in prompts for _ in range(num_views)]
 
             if exists(time_video_denoise):
-                assert time_video_denoise.shape[0] == batch
+                num_time_steps = time_video_denoise.shape[0]
+                assert num_time_steps == batch
 
         if not exists(time_video_denoise):
             if is_training:
@@ -913,7 +923,9 @@ class MimicVideo(Module):
             if time_video_denoise.ndim == 0:
                 time_video_denoise = rearrange(time_video_denoise, '-> 1')
 
-            if time_video_denoise.shape[0] != batch:
+            num_time_steps = time_video_denoise.shape[0]
+
+            if num_time_steps != batch:
                 time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
 
         if not exists(cache):
@@ -1057,7 +1069,7 @@ class MimicVideo(Module):
 
                 action_prefix_mask = lens_to_mask(rand_prefix_len, self.action_chunk_len)
 
-                actions = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, actions)
+                noised = einx.where('b na, b na d, b na d', action_prefix_mask, orig_actions, noised)
                 time = einx.where('b na, , b', action_prefix_mask, 1., time)
 
                 action_loss_mask = ~action_prefix_mask
@@ -1083,7 +1095,8 @@ class MimicVideo(Module):
         register_tokens = empty_token
 
         if self.has_register_tokens:
-            register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = tokens.shape[0])
+            num_tokens = tokens.shape[0]
+            register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = num_tokens)
 
         # one layer of rnn for actions
 
@@ -1266,7 +1279,8 @@ class MimicVideo(Module):
             zero = self.zero
 
             if unreduced_loss:
-                zero = repeat(zero, '-> b', b = actions.shape[0])
+                num_actions = actions.shape[0]
+                zero = repeat(zero, '-> b', b = num_actions)
 
             state_autoencoder_loss = joint_latent_dynamics_loss = zero
 

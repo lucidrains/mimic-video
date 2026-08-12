@@ -474,7 +474,9 @@ class MiniMaxH3PredictWrapper(Module):
         num_text_tokens = text_token_tags.shape[0]
         num_audio_rows = audio_indices.shape[0]
 
-        row_timesteps = torch.full((num_text_tokens + num_audio_rows + video_indices.shape[0],), base_ts, dtype = torch.float32, device = self.device)
+        num_video_rows = video_indices.shape[0]
+
+        row_timesteps = torch.full((num_text_tokens + num_audio_rows + num_video_rows,), base_ts, dtype = torch.float32, device = self.device)
 
         if has_audio:
             audio_ts = torch.full((num_audio_rows,), base_ts, dtype = torch.float32, device = self.device)
@@ -653,7 +655,9 @@ class MiniMaxH3PredictWrapper(Module):
                 timestep = cast_tensor(timestep, device = self.device)
                 if timestep.ndim == 0:
                     timestep = rearrange(timestep, '-> 1')
-                if timestep.shape[0] != batch:
+                num_timesteps = timestep.shape[0]
+
+                if num_timesteps != batch:
                     timestep = repeat(timestep, '1 -> b', b = batch)
             else:
                 timestep = torch.zeros(batch, device = self.device)

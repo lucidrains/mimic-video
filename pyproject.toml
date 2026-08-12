@@ -1,6 +1,6 @@
 [project]
 name = "mimic-video"
-version = "0.4.0"
+version = "0.4.1"
 description = "Mimic Video"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -30,7 +30,7 @@ dependencies = [
     "ema-pytorch",
     "peft",
     "torch>=2.5",
-    "torch-einops-utils>=0.1.12",
+    "torch-einops-utils>=0.1.19",
     "tqdm",
     "x-mlps-pytorch",
     "x-transformers>=2.24.1"
@@ -48,6 +48,12 @@ test = [
     "accelerate",
     "diffusers>=0.32.0",
     "transformers",
+]
+
+libero = [
+    "av",
+    "huggingface-hub",
+    "pyarrow",
 ]
 
 [tool.pytest.ini_options]

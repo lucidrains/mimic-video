@@ -106,6 +106,54 @@ loss = model(
 )
 ```
 
+## LIBERO training
+
+```shell
+$ pip install "mimic-video[libero]"
+```
+
+Then use the `LiberoDataset`
+
+```python
+import torch
+
+from mimic_video import MimicVideo, LiberoDataset
+from mimic_video.cosmos_predict import CosmosPredictWrapper
+
+# tiny random-weights video backbone, so this runs anywhere
+# swap in a real Cosmos or MiniMax H3 wrapper for actual learning
+
+video_wrapper = CosmosPredictWrapper(
+    extract_layer = 1,
+    random_weights = True,
+    tiny = True
+)
+
+# dataset - single test episode
+
+dataset = LiberoDataset('yygx/libero44_KITCHEN_SCENE1_open_the_top_drawer_of_the_cabinet')
+
+# mimic video
+
+model = MimicVideo(
+    512,
+    video_wrapper,
+    dim_joint_state = dataset.dim_joint_state,
+    dim_action = dataset.dim_action
+)
+
+optimizer = torch.optim.Adam(model.action_parameters())
+
+# splat in the batched data
+
+for batch in dataset.get_dataloader(batch_size = 1):
+    loss = model(**batch)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
 ## Contributing
 
 First make sure `pytest` and test dependencies are installed with

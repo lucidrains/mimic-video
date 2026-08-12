@@ -9,7 +9,7 @@ from ema_pytorch import EMA
 from assoc_scan import AssocScan
 
 from einops import rearrange
-from torch_einops_utils import lens_to_mask
+from torch_einops_utils import lens_to_mask, temp_eval
 
 # functions
 
@@ -180,8 +180,7 @@ class FlowSteering(Module):
         if exists(exploration_noise):
             noise_latents = noise_latents + exploration_noise
 
-        with torch.no_grad():
-            self.action_flow_model.eval()
+        with torch.no_grad(), temp_eval(self.action_flow_model):
             actions = self.action_flow_model.sample(*args, noise_latents = noise_latents, **kwargs)
 
         return actions, noise_latents
