@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 from einops import rearrange, repeat
 import einx
 
-from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean
+from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean, temp_eval
 
 from mimic_video.utils import exists, default, check_import
 
@@ -159,7 +159,7 @@ class MiniMaxH3PredictWrapper(Module):
         train_fixed_video_prefix_max_delay: int | None = None
     ):
         super().__init__()
-        extract_layers = default(default(extract_layers, extract_layer), 34)
+        extract_layers = default(default(extract_layers, extract_layer), 24)
         self.extract_layers = [extract_layers] if isinstance(extract_layers, int) else extract_layers
         self.return_list = isinstance(extract_layers, list)
 
@@ -347,6 +347,7 @@ class MiniMaxH3PredictWrapper(Module):
             audio = rearrange(audio, 'b s -> b 1 s')
 
         batch, channels, samples = audio.shape
+        assert channels == self.audio_channels, f'audio must have {self.audio_channels} channels, but got {channels} - convert mono to stereo (e.g. duplicate the channel) before passing into the wrapper'
 
         num_samples = num_audio_latents * self.audio_hop_length
         if samples < num_samples:
@@ -541,7 +542,13 @@ class MiniMaxH3PredictWrapper(Module):
 
         timesteps = torch.linspace(0.0, 1.0 - target_tau, steps + 1, device = self.device)
         curr_latents = latents.clone()
-        curr_audio = audio_rows.clone() if has_audio else None
+
+        if has_audio:
+            audio_noise = torch.randn_like(audio_rows)
+            curr_audio = audio_rows.clone()
+            curr_audio[:, num_prefix_audio * self.audio_channels:] = audio_noise[:, num_prefix_audio * self.audio_channels:]
+        else:
+            curr_audio = None
 
         for i in range(steps):
             t_curr = timesteps[i]
@@ -602,6 +609,8 @@ class MiniMaxH3PredictWrapper(Module):
 
     # forward
 
+    @torch.no_grad()
+    @temp_eval
     def forward(
         self,
         videos: Tensor,
@@ -735,6 +744,13 @@ class MiniMaxH3PredictWrapper(Module):
         self.transformer.train()
         if unfreeze_transformer:
             for p in self.transformer.parameters(): p.requires_grad = True
+
+        self.vae.eval()
+        self.text_encoder.eval()
+        self.text_proj.eval()
+
+        if exists(self.audio_vae):
+            self.audio_vae.eval()
 
         dataloader = DataLoader(dataset, batch_size = batch_size, shuffle = True)
         optimizer = torch.optim.AdamW(self.transformer.parameters(), lr = lr)

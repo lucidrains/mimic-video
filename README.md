@@ -84,7 +84,7 @@ from mimic_video import MimicVideo, MiniMaxH3PredictWrapper
 
 video_wrapper = MiniMaxH3PredictWrapper(
     model_name = 'MiniMaxAI/MiniMax-H3',
-    extract_layer = 34
+    extract_layer = 24
 )
 
 model = MimicVideo(512, video_wrapper)
