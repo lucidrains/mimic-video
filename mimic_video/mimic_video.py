@@ -402,26 +402,32 @@ class Actor(Module):
     ):
         super().__init__()
         self.model = model
-        self.action_queries = nn.Parameter(torch.randn(model.action_chunk_len, model.dim_action))
+
+        self.action_queries = nn.ParameterList([
+            nn.Parameter(torch.randn(model.action_chunk_len, d))
+            for d in model.embodiment_action_dims
+        ])
 
     def forward(
         self,
         *args,
         joint_state,
         video = None,
+        body_id = 0,
         **kwargs
     ):
         assert 'actions' not in kwargs, 'actions should not be passed into actor'
 
         batch = joint_state.shape[0]
 
-        queries = repeat(self.action_queries, 'n d -> b n d', b = batch)
+        queries = repeat(self.action_queries[int(body_id)], 'n d -> b n d', b = batch)
 
         return self.model(
             *args,
             joint_state = joint_state,
             video = video,
             actions = queries,
+            body_id = body_id,
             **kwargs
         )
 
@@ -496,21 +502,40 @@ class MimicVideo(Module):
         self.num_video_viewpoints = num_video_viewpoints
 
         # action related
+        # multiple embodiments, detected when `dim_action` is a tuple, one action dim per embodiment
+        # single embodiment is simply multiple embodiments of length 1
 
         self.action_chunk_len = action_chunk_len
-        self.dim_action = dim_action
 
-        self.action_shape = (action_chunk_len, dim_action)
+        if isinstance(dim_action, (tuple, list)):
+            embodiment_action_dims = list(dim_action)
+            assert isinstance(dim_joint_state, (tuple, list)) and len(dim_joint_state) == len(embodiment_action_dims), 'for multiple embodiments, `dim_joint_state` must also be a tuple with one proprioception dim per embodiment'
+        else:
+            embodiment_action_dims = [dim_action]
+
+        self.num_embodiments = len(embodiment_action_dims)
+
+        self.embodiment_action_dims = embodiment_action_dims
+        self.embodiment_joint_state_dims = list(dim_joint_state) if isinstance(dim_joint_state, (tuple, list)) else [dim_joint_state]
+
+        self.dim_action = dim_action # int or tuple of ints, one per embodiment
+
+        self.action_shapes = [(action_chunk_len, d) for d in embodiment_action_dims]
+        self.action_shape = self.action_shapes[0] # back compat
 
         self.action_normalizer = None
 
         if exists(action_mean_std):
-            assert action_mean_std.shape == (2, dim_action), f'must be in shape of (2 action_dim)'
-            self.action_normalizer = Normalizer(*action_mean_std)
+            if is_tensor(action_mean_std):
+                action_mean_std = [action_mean_std]
+
+            assert len(action_mean_std) == self.num_embodiments, 'must be one (mean, std) pair per embodiment'
+
+            self.action_normalizer = ModuleList([Normalizer(*m) for m in action_mean_std])
 
         # joint dim
 
-        self.dim_joint_state = dim_joint_state
+        self.dim_joint_state = dim_joint_state # int or tuple of ints, one per embodiment
 
         dim_video_hidden = default(dim_video_hidden, video_predict_wrapper.dim_latent if exists(video_predict_wrapper) else None)
 
@@ -523,14 +548,20 @@ class MimicVideo(Module):
         self.joint_normalizer = None
 
         if exists(joint_mean_std):
-            assert joint_mean_std.shape == (2, dim_joint_state), 'joint_mean_std must have shape of (2, dim_joint_state)'
-            self.joint_normalizer = Normalizer(*joint_mean_std)
+            if is_tensor(joint_mean_std):
+                joint_mean_std = [joint_mean_std]
+
+            assert len(joint_mean_std) == self.num_embodiments, 'must be one (mean, std) pair per embodiment'
+
+            self.joint_normalizer = ModuleList([Normalizer(*m) for m in joint_mean_std])
 
         # flow related
 
         self.sample_time_fn = default(sample_time_fn, default_sample_time_fn)
 
-        self.to_action_tokens = Linear(dim_action, dim)
+        # one action -> token projection per embodiment
+
+        self.to_action_tokens = ModuleList([Linear(d, dim) for d in self.embodiment_action_dims])
 
         # register tokens
 
@@ -552,7 +583,9 @@ class MimicVideo(Module):
 
         # joint token related
 
-        self.to_joint_state_token = Linear(dim_joint_state, dim)
+        # one proprioception -> token projection per embodiment
+
+        self.to_joint_state_token = ModuleList([Linear(d, dim) for d in self.embodiment_joint_state_dims])
 
         self.proprio_mask_prob = proprio_mask_prob
         self.has_proprio_masking = proprio_mask_prob > 0.
@@ -608,7 +641,11 @@ class MimicVideo(Module):
         self.final_norm = nn.RMSNorm(dim)
 
         if not exists(pred_head):
-            pred_head = LinearNoBias(dim, dim_action)
+            pred_head = ModuleList([LinearNoBias(dim, d) for d in self.embodiment_action_dims])
+        elif not isinstance(pred_head, ModuleList):
+            pred_head = ModuleList([pred_head] * self.num_embodiments)
+
+        assert len(pred_head) == self.num_embodiments, 'must be one prediction head per embodiment'
 
         self.to_pred = pred_head
 
@@ -681,12 +718,16 @@ class MimicVideo(Module):
         kwargs = self._init_kwargs.copy()
 
         dim = kwargs['dim']
-        dim_action = kwargs.get('dim_action', self.dim_action)
+        dim_action = kwargs['dim_action']
 
-        pred_head = nn.Sequential(
-            LinearNoBias(dim, dim_action * 2),
-            Rearrange('b n (d c) -> b n d c', c = 2)
-        )
+        embodiment_action_dims = list(dim_action) if isinstance(dim_action, (tuple, list)) else [dim_action]
+
+        pred_head = ModuleList([
+            nn.Sequential(
+                LinearNoBias(dim, d * 2),
+                Rearrange('b n (d c) -> b n d c', c = 2)
+            ) for d in embodiment_action_dims
+        ])
 
         kwargs.update(
             is_flow_model = False,
@@ -743,12 +784,21 @@ class MimicVideo(Module):
         noise_latents = None,
         return_rl_token = False,
         num_cached_steps = 1,
+        body_id = 0,               # which embodiment to generate actions for
         **kwargs
     ):
         assert predict_num_future_latents > 0
 
         if return_rl_token:
             assert num_cached_steps >= 1, '`num_cached_steps` must be at least 1 if `return_rl_token` is given'
+
+        body_id = int(body_id)
+
+        # embodiment related
+        # select out the projections belonging to the given body, a batch is for a single body
+
+        normalizer = self.action_normalizer[body_id] if exists(self.action_normalizer) else None
+        action_shape = self.action_shapes[body_id]
 
         inpainting = exists(prefix_action_chunk)
 
@@ -765,15 +815,15 @@ class MimicVideo(Module):
 
             maybe_normed_prefix = prefix_action_chunk
 
-            if exists(self.action_normalizer):
-                maybe_normed_prefix = self.action_normalizer.normalize(prefix_action_chunk)
+            if exists(normalizer):
+                maybe_normed_prefix = normalizer.normalize(prefix_action_chunk)
 
             times = repeat(times, 'steps -> steps b n', b = batch_size, n = self.action_chunk_len).clone()
             times[..., :prefix_len] = 1.
 
         # noise
 
-        action_shape = (batch_size, *self.action_shape)
+        action_shape = (batch_size, *action_shape)
 
         if not exists(noise_latents):
             noise_latents = torch.randn(action_shape, device = self.device)
@@ -795,16 +845,16 @@ class MimicVideo(Module):
             cache_accumulation_step = step_idx >= (steps - num_cached_steps)
 
             if cache_accumulation_step:
-                pred_flow, intermediates = self.forward(actions = denoised, time = time, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
+                pred_flow, intermediates = self.forward(actions = denoised, time = time, body_id = body_id, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
             else:
-                pred_flow = self.forward(actions = denoised, time = time, predict_num_future_latents = predict_num_future_latents, **kwargs)
+                pred_flow = self.forward(actions = denoised, time = time, body_id = body_id, predict_num_future_latents = predict_num_future_latents, **kwargs)
 
             denoised = denoised + delta * pred_flow
 
         # handle action inverse norm
 
-        if exists(self.action_normalizer):
-            denoised = self.action_normalizer.inverse_normalize(denoised)
+        if exists(normalizer):
+            denoised = normalizer.inverse_normalize(denoised)
 
         # final set, with unnormalized prefix, if inpainting
 
@@ -835,6 +885,7 @@ class MimicVideo(Module):
         *,
         actions = None,                 # (b na d)
         joint_state,                    # (b)
+        body_id = 0,                    # which embodiment this batch of actions belongs to
         task_ids = None,                # (b)
         advantage_ids = None,           # (b)
         dropout_advantage_ids = False,
@@ -865,10 +916,23 @@ class MimicVideo(Module):
             assert exists(actions), 'actions must be given (queries for actor, actual actions for critic)'
 
         assert not exists(self.video_predict_wrapper) or (exists(prompts) ^ exists(prompt_token_ids))
-        assert actions.shape[-2:] == self.action_shape
 
-        if exists(self.action_normalizer):
-            actions = self.action_normalizer.normalize(actions)
+        # embodiment related
+        # select out the projections belonging to the given body, a batch is for a single body
+
+        body_id = int(body_id)
+
+        assert actions.shape[-2:] == self.action_shapes[body_id]
+
+        to_action_tokens = self.to_action_tokens[body_id]
+        to_pred = self.to_pred[body_id]
+        to_joint_state_token = self.to_joint_state_token[body_id]
+
+        normalizer = self.action_normalizer[body_id] if exists(self.action_normalizer) else None
+        joint_normalizer = self.joint_normalizer[body_id] if exists(self.joint_normalizer) else None
+
+        if exists(normalizer):
+            actions = normalizer.normalize(actions)
 
         batch, seq_len, device = actions.shape[0], actions.shape[1], actions.device
         orig_actions = actions
@@ -1084,7 +1148,7 @@ class MimicVideo(Module):
 
         # embed
 
-        tokens = self.to_action_tokens(noised)
+        tokens = to_action_tokens(noised)
 
         # setup empty tokens for various packed condition tokens
 
@@ -1105,10 +1169,10 @@ class MimicVideo(Module):
 
         #  mask joint state token for proprioception masking training
 
-        if exists(self.joint_normalizer):
-            joint_state = self.joint_normalizer.normalize(joint_state)
+        if exists(joint_normalizer):
+            joint_state = joint_normalizer.normalize(joint_state)
 
-        joint_state_token = self.to_joint_state_token(joint_state)
+        joint_state_token = to_joint_state_token(joint_state)
 
         if self.training and self.has_proprio_masking:
             mask = torch.rand((batch,), device = device) < self.proprio_mask_prob
@@ -1245,7 +1309,7 @@ class MimicVideo(Module):
 
         # prediction
 
-        pred = self.to_pred(embed)
+        pred = to_pred(embed)
 
         # if being used for actor / critic, then just return the prediction
 

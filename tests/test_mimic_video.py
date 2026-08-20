@@ -113,6 +113,45 @@ def test_e2e(
 
     assert pred_actions.shape == (1, 32, 20)
 
+def test_multiple_embodiments():
+    from mimic_video.mimic_video import MimicVideo
+
+    model = MimicVideo(
+        dim = 256,
+        dim_video_hidden = 64,
+        dim_action = (20, 7),
+        dim_joint_state = (32, 16),
+        depth = 2
+    )
+
+    video_hiddens = torch.randn(2, 16, 64)
+
+    # train a batch of actions for each body, with its own action and proprioception dims
+
+    for body_id in range(2):
+        joint_state = torch.randn(2, model.embodiment_joint_state_dims[body_id])
+        actions = torch.randn(2, 32, model.embodiment_action_dims[body_id])
+
+        loss = model(actions = actions, joint_state = joint_state, video_hiddens = video_hiddens, body_id = body_id)
+        loss.backward()
+
+        assert loss.numel() == 1
+
+    # generation for each body returns the proper action dim
+
+    for body_id in range(2):
+        joint_state = torch.randn(1, model.embodiment_joint_state_dims[body_id])
+
+        sampled = model.sample(
+            steps = 2,
+            joint_state = joint_state,
+            video_hiddens = video_hiddens[:1],
+            body_id = body_id,
+            disable_progress_bar = True
+        )
+
+        assert sampled.shape == (1, 32, model.embodiment_action_dims[body_id])
+
 def test_lora_e2e():
     import os
     import shutil
