@@ -28,7 +28,8 @@ def test_mimic_video(
         task_ids = torch.randint(0, 3, (2,))
 
     mimic_video = MimicVideo(
-        512,
+        256,
+        depth = 4,
         action_mean_std = action_mean_std,
         dim_video_hidden = 77,
         train_time_rtc = train_time_rtc,
@@ -62,17 +63,19 @@ def test_mimic_video(
 @param('prev_action_chunk', (False, True))
 @param('cross_attend_multiple', (False, True))
 @param('num_video_viewpoints', (1, 2))
+@param('video_attn_mask', (None, 2, torch.tensor([True, False])))
 def test_e2e(
     prev_action_chunk,
     cross_attend_multiple,
-    num_video_viewpoints
+    num_video_viewpoints,
+    video_attn_mask
 ):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
 
     if cross_attend_multiple:
         extract_layer = [19, 20]
-        extracted_video_layer_indices = [0, 1, 1] # first layer attends to 19, second and third to 20
+        extracted_video_layer_indices = [0, 1] # first layer attends to 19, second to 20
     else:
         extract_layer = 19
         extracted_video_layer_indices = None
@@ -84,25 +87,32 @@ def test_e2e(
     )
 
     model = MimicVideo(
-        512,
+        256,
         video_wrapper,
-        depth = 3,
+        depth = 2,
         extracted_video_layer_indices = extracted_video_layer_indices,
         num_video_viewpoints = num_video_viewpoints
     )
 
     num_views = (num_video_viewpoints,) if num_video_viewpoints > 1 else ()
-    video = torch.rand(1, *num_views, 5, 3, 32, 32)
+    video = torch.rand(1, *num_views, 5, 3, 16, 16)
 
     actions = torch.randn(1, 32, 20)
 
     joint_state = torch.randn(1, 32)
 
+    mask_kwargs = {}
+    if isinstance(video_attn_mask, int):
+        mask_kwargs.update(context_frames = video_attn_mask)
+    elif video_attn_mask is not None:
+        mask_kwargs.update(video_frames_mask = video_attn_mask)
+
     loss = model(
         video = video,
         actions = actions,
         joint_state = joint_state,
-        prompts = 'put the package on the conveyer belt'
+        prompts = 'put the package on the conveyer belt',
+        **mask_kwargs
     )
 
     loss.backward()
@@ -115,7 +125,72 @@ def test_e2e(
         video = video,
         joint_state = joint_state,
         prompts = 'pass the butter',
-        prefix_action_chunk = prefix_action_chunk
+        prefix_action_chunk = prefix_action_chunk,
+        steps = 1,
+        **mask_kwargs
+    )
+
+    assert pred_actions.shape == (1, 32, 20)
+
+def test_video_frames_mask():
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.cosmos_predict import CosmosPredictWrapper
+
+    video_wrapper = CosmosPredictWrapper(
+        extract_layer = 1,
+        random_weights = True,
+        tiny = True
+    )
+
+    model = MimicVideo(256, video_wrapper, depth = 2)
+
+    video = torch.rand(2, 17, 3, 16, 16) # 17 pixel frames - the tiny vae compresses temporally by 4x, so 5 latent frames
+    joint_state = torch.randn(2, 32)
+    actions = torch.randn(2, 32, 20)
+
+    # whole video as context - attend to all video tokens
+
+    loss = model(
+        prompts = 'pass the butter',
+        video = video,
+        actions = actions,
+        joint_state = joint_state
+    )
+
+    loss.backward()
+
+    # leading 9 pixel frames as observed context - kept clean during training, everything else denoised
+
+    loss = model(
+        prompts = 'pass the butter',
+        video = video,
+        actions = actions,
+        joint_state = joint_state,
+        context_frames = 9
+    )
+
+    loss.backward()
+
+    # same, in the general per-latent-frame form
+
+    loss = model(
+        prompts = 'pass the butter',
+        video = video,
+        actions = actions,
+        joint_state = joint_state,
+        video_frames_mask = torch.tensor([True, True, True, False, False])
+    )
+
+    loss.backward()
+
+    # reactive sampling - conditioned on the observed context only
+
+    pred_actions = model.sample(
+        prompts = 'pass the butter',
+        video = video[:1],
+        joint_state = joint_state[:1],
+        steps = 1,
+        context_frames = 9
     )
 
     assert pred_actions.shape == (1, 32, 20)
@@ -169,7 +244,7 @@ def test_lora_e2e():
     class DummyRobotDataset(Dataset):
         def __len__(self): return 1
         def __getitem__(self, _):
-            return torch.rand(9, 3, 32, 32), torch.randint(0, 1000, (32,))
+            return torch.rand(9, 3, 16, 16), torch.randint(0, 1000, (32,))
 
     save_path = './cosmos-lora-test'
     if os.path.exists(save_path):
@@ -201,15 +276,15 @@ def test_lora_e2e():
     # 3. mimic video integration
 
     model = MimicVideo(
-        dim = 512,
+        dim = 256,
         video_predict_wrapper = lora_wrapper,
-        depth = 3,
-        extracted_video_layer_indices = [0, 1, 1]
+        depth = 2,
+        extracted_video_layer_indices = [0, 1]
     )
 
     # 4. dummy states and actions
 
-    video = torch.rand(1, 5, 3, 32, 32)
+    video = torch.rand(1, 5, 3, 16, 16)
     joint_state = torch.randn(1, 32)
     actions = torch.randn(1, 32, 20)
 
@@ -230,7 +305,8 @@ def test_lora_e2e():
     sampled_actions = model.sample(
         prompts = 'the final task',
         video = video,
-        joint_state = joint_state
+        joint_state = joint_state,
+        steps = 2
     )
 
     assert sampled_actions.shape == (1, 32, 20)
@@ -257,7 +333,7 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns, use_hl_gauss)
 
     # mimic video
 
-    model = MimicVideo(512, video_wrapper)
+    model = MimicVideo(256, video_wrapper, depth = 2)
 
     # wrap model with diffusion steering
 
@@ -265,7 +341,7 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns, use_hl_gauss)
 
     # states
 
-    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+    video = torch.rand(2, 5, 3, 16, 16) # 5 frames, 3 channels, 16 x 16
 
     joint_state = torch.randn(2, 32)
     rewards = torch.randn(2, 4) if n_step_returns else torch.randn(2)
@@ -298,7 +374,8 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns, use_hl_gauss)
     actions, noise_latents = model.sample(
         prompts = 'peel the orange',
         video = video[:1],
-        joint_state = joint_state[:1]
+        joint_state = joint_state[:1],
+        steps = 2
     )
 
     assert actions.shape == (1, 32, 20)
@@ -316,11 +393,11 @@ def test_q_planning(n_step_returns, done):
         tiny = True
     )
 
-    model = MimicVideo(512, video_wrapper)
+    model = MimicVideo(256, video_wrapper, depth = 2)
 
     planner = QPlanner(model)
 
-    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+    video = torch.rand(2, 5, 3, 16, 16) # 5 frames, 3 channels, 16 x 16
 
     joint_state = torch.randn(2, 32)
 
@@ -402,7 +479,7 @@ def test_state_autoencoder():
     video_mask = torch.randint(0, 2, (2, seq_len)).bool()
 
     mimic_video = MimicVideo(
-        512,
+        256,
         dim_video_hidden = dim_video_hidden,
         state_autoencoder = autoencoder_kwargs
     )
@@ -438,7 +515,7 @@ def test_joint_latent_dynamics():
     from mimic_video.mimic_video import MimicVideo
 
     mimic_video = MimicVideo(
-        dim = 512,
+        dim = 256,
         dim_video_hidden = 77,
         has_joint_latent_dynamics = True
     )
@@ -484,7 +561,7 @@ def test_mimic_video_unreduced_loss():
 
     batch_size = 4
     mimic_video = MimicVideo(
-        dim = 512,
+        dim = 256,
         dim_video_hidden = 77,
         has_joint_latent_dynamics = True
     )
@@ -650,9 +727,9 @@ def test_minimax_h3_e2e():
         tiny = True,
     )
 
-    model = MimicVideo(512, video_wrapper)
+    model = MimicVideo(256, video_wrapper, depth = 2)
 
-    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+    video = torch.rand(2, 5, 3, 16, 16) # 5 frames, 3 channels, 16 x 16
 
     joint_state = torch.randn(2, 32)
 
@@ -681,10 +758,10 @@ def test_minimax_h3_e2e():
     )
 
     model = MimicVideo(
-        512,
+        256,
         video_wrapper,
-        depth = 3,
-        extracted_video_layer_indices = [0, 1, 1]
+        depth = 2,
+        extracted_video_layer_indices = [0, 1]
     )
 
     loss = model(
@@ -707,7 +784,8 @@ def test_minimax_h3_e2e():
         video = video,
         audio = audio,
         actions = actions,
-        joint_state = joint_state
+        joint_state = joint_state,
+        context_frames = 2
     )
 
     loss.backward()
@@ -720,7 +798,9 @@ def test_minimax_h3_e2e():
         prompts = 'peel the orange',
         video = video[:1],
         audio = audio[:1],
-        joint_state = joint_state[:1]
+        joint_state = joint_state[:1],
+        steps = 2,
+        context_frames = 2
     )
 
     assert pred_actions.shape == (1, 32, 20)
@@ -737,7 +817,7 @@ def test_minimax_h3_lora_e2e():
     class DummyRobotDataset(Dataset):
         def __len__(self): return 1
         def __getitem__(self, _):
-            return torch.rand(9, 3, 32, 32), torch.randn(2, 8000), torch.randint(0, 1000, (32,))
+            return torch.rand(9, 3, 16, 16), torch.randn(2, 8000), torch.randint(0, 1000, (32,))
 
     save_path = './minimax-h3-lora-test'
     if os.path.exists(save_path):
@@ -769,15 +849,15 @@ def test_minimax_h3_lora_e2e():
     # 3. mimic video integration
 
     model = MimicVideo(
-        dim = 512,
+        dim = 256,
         video_predict_wrapper = lora_wrapper,
-        depth = 3,
-        extracted_video_layer_indices = [0, 1, 1]
+        depth = 2,
+        extracted_video_layer_indices = [0, 1]
     )
 
     # 4. dummy states and actions
 
-    video = torch.rand(1, 5, 3, 32, 32)
+    video = torch.rand(1, 5, 3, 16, 16)
     joint_state = torch.randn(1, 32)
     actions = torch.randn(1, 32, 20)
 
@@ -798,7 +878,8 @@ def test_minimax_h3_lora_e2e():
     sampled_actions = model.sample(
         prompts = 'the final task',
         video = video,
-        joint_state = joint_state
+        joint_state = joint_state,
+        steps = 2
     )
 
     assert sampled_actions.shape == (1, 32, 20)

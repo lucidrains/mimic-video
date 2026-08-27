@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import warnings
 import numpy as np
@@ -580,6 +581,7 @@ class MiniMaxH3PredictWrapper(Module):
         text_token_tags: Tensor,
         timestep: Tensor,
         use_fixed_prefix: bool = False,
+        video_frames_mask: Tensor | None = None,
         audio_rows: Tensor | None = None,
         audio_noise: Tensor | None = None
     ):
@@ -593,6 +595,10 @@ class MiniMaxH3PredictWrapper(Module):
             fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
             fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
             padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
+
+        if exists(video_frames_mask):
+            frame_mask = rearrange(video_frames_mask, 'b f -> b 1 f 1 1')
+            padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', frame_mask, 0., padded_timestep)
 
         noisy_latents = torch.lerp(latents, noise, padded_timestep)
         transformer_timestep = 1.0 - padded_timestep
@@ -620,7 +626,9 @@ class MiniMaxH3PredictWrapper(Module):
         timestep: float | Tensor | None = None,
         predict_num_future_latents = 0,
         video_flow_target_tau: float = 1.0,
-        inference_steps: int = 10
+        inference_steps: int = 10,
+        video_frames_mask: Tensor | None = None, # (b, f) | (f,) bool - latent video frames the action tower attends to - kept clean during training, everything else denoised
+        context_frames = 0 # shorthand for the leading `context_frames` frames (in pixels)
     ) -> Tensor | list[Tensor]:
 
         batch = videos.shape[0]
@@ -645,6 +653,23 @@ class MiniMaxH3PredictWrapper(Module):
 
         latents = self.vae.encode(videos).latent_dist.sample()
         latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
+
+        _, _, num_latent_frames, latent_height, latent_width = latents.shape
+
+        if context_frames > 0:
+            assert not exists(video_frames_mask), 'give either `context_frames` or `video_frames_mask`, not both'
+
+            context_latent_frames = math.ceil(context_frames / self.vae_temporal_compression_ratio)
+            video_frames_mask = lens_to_mask(tensor([context_latent_frames]), num_latent_frames)
+            video_frames_mask = repeat(video_frames_mask, '1 f -> b f', b = batch)
+
+        if exists(video_frames_mask):
+            if video_frames_mask.ndim == 1:
+                video_frames_mask = repeat(video_frames_mask, 'f -> b f', b = batch)
+
+            video_frames_mask = video_frames_mask.to(self.device)
+
+            assert video_frames_mask.shape == (batch, num_latent_frames), f'`video_frames_mask` must be of shape (batch, {num_latent_frames}) or ({num_latent_frames},)'
 
         is_inference = predict_num_future_latents > 0
 
@@ -679,10 +704,10 @@ class MiniMaxH3PredictWrapper(Module):
             all_same_timestep = (timestep == timestep[0]).all()
 
             if batch == 1 or (all_same_timestep and not use_fixed_prefix):
-                hiddens = self._train_forward_item(latents, noise, encoder_states, text_token_tags, timestep, use_fixed_prefix, audio_rows = audio_rows, audio_noise = audio_noise)
+                hiddens = self._train_forward_item(latents, noise, encoder_states, text_token_tags, timestep, use_fixed_prefix, video_frames_mask = video_frames_mask, audio_rows = audio_rows, audio_noise = audio_noise)
             else:
                 per_item_hiddens = [
-                    self._train_forward_item(latents[i:i+1], noise[i:i+1], encoder_states[i:i+1], text_token_tags, timestep[i:i+1], use_fixed_prefix, audio_rows = audio_rows[i:i+1] if exists(audio_rows) else None, audio_noise = audio_noise[i:i+1] if exists(audio_noise) else None)
+                    self._train_forward_item(latents[i:i+1], noise[i:i+1], encoder_states[i:i+1], text_token_tags, timestep[i:i+1], use_fixed_prefix, video_frames_mask = video_frames_mask, audio_rows = audio_rows[i:i+1] if exists(audio_rows) else None, audio_noise = audio_noise[i:i+1] if exists(audio_noise) else None)
                     for i in range(batch)
                 ]
 
@@ -710,7 +735,38 @@ class MiniMaxH3PredictWrapper(Module):
 
             hiddens = self.cached_hidden_states[:len(self.extract_layers)]
 
+        if exists(video_frames_mask):
+            patch_h, patch_w = self.patch_size[1], self.patch_size[2]
+            rows_per_frame = (latent_height // patch_h) * (latent_width // patch_w)
+            num_audio_rows = audio_rows.shape[1] if exists(audio_rows) else 0
+            context_mask = self.get_context_mask(hiddens[0], num_audio_rows, rows_per_frame, video_frames_mask)
+            return (hiddens, context_mask) if self.return_list else (hiddens[0], context_mask)
+
         return hiddens if self.return_list else hiddens[0]
+
+    def get_context_mask(
+        self,
+        hidden: Tensor,
+        num_audio_rows: int,
+        rows_per_frame: int,
+        video_frames_mask: Tensor
+    ) -> Tensor:
+        batch, seq_len, _ = hidden.shape
+
+        video_mask = repeat(video_frames_mask, 'b f -> b (f r)', r = rows_per_frame)
+
+        num_attended_rows = video_mask.shape[-1]
+        device = video_mask.device
+
+        num_video_rows = seq_len - num_audio_rows
+
+        if num_attended_rows < num_video_rows: # future frames appended at inference, masked out
+            num_future_rows = num_video_rows - num_attended_rows
+            video_mask = cat((video_mask, torch.zeros(batch, num_future_rows, dtype = torch.bool, device = device)), dim = -1)
+
+        audio_mask = torch.ones(batch, num_audio_rows, dtype = torch.bool, device = device)
+
+        return cat((audio_mask, video_mask), dim = -1)
 
     # finetuning
 

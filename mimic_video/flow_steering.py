@@ -193,6 +193,7 @@ class FlowSteering(Module):
         actions = None,
         exploration_noise = None,
         exploration_noise_std = None,
+        steps = 16,
         **kwargs
     ):
         noise_latents = self.actor_forward(*args, **kwargs)
@@ -208,7 +209,7 @@ class FlowSteering(Module):
             noise_latents = noise_latents + exploration_noise
 
         with torch.no_grad(), temp_eval(self.action_flow_model):
-            actions = self.action_flow_model.sample(*args, noise_latents = noise_latents, **kwargs)
+            actions = self.action_flow_model.sample(*args, steps = steps, noise_latents = noise_latents, **kwargs)
 
         return actions, noise_latents
 

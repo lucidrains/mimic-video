@@ -218,7 +218,7 @@ class AdaptiveRMSNorm(Module):
 
 # attention
 
-Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len', 'video_hiddens'])
+Cache = namedtuple('Cache', ['self_attn_kv', 'gru_hidden', 'seq_len', 'video_hiddens', 'context_mask'])
 Losses = namedtuple('Losses', ['flow', 'state_autoencoder', 'joint_latent_dynamics'])
 Intermediates = namedtuple('Intermediates', ['cache', 'joint_state_latent', 'losses'])
 
@@ -916,6 +916,8 @@ class MimicVideo(Module):
         audio = None,                   # (b s) | (b c s) - optional audio waveform from minimax h3
         video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
         context_mask = None,
+        context_frames = 0,             # leading frames (in pixels) of the video that are attended to - shorthand for `video_frames_mask`
+        video_frames_mask = None,       # (b, f) | (f,) bool - latent video frames the action tower attends to - kept clean during training, everything else denoised
         time = None,                    # () | (b) | (b n)
         time_video_denoise = None,      # override default logit normal sampling for video denoising time
         noise_latents = None,           # (b na d) or (b k na d) - for flow steering or explorative modeling
@@ -1034,17 +1036,30 @@ class MimicVideo(Module):
                     prompts = prompts,
                     prompt_token_ids = prompt_token_ids,
                     timestep = video_timestep,
-                    predict_num_future_latents = predict_num_future_latents
+                    predict_num_future_latents = predict_num_future_latents,
+                    context_frames = context_frames,
+                    video_frames_mask = video_frames_mask
                 )
 
                 if exists(audio):
                     video_forward_kwargs.update(audio = audio)
 
-                video_hiddens = video_forward_wrap(self.video_predict_wrapper)(video, **video_forward_kwargs)
+                out = video_forward_wrap(self.video_predict_wrapper)(video, **video_forward_kwargs)
+
+                if context_frames > 0 or exists(video_frames_mask):
+                    video_hiddens, context_mask = out
+                else:
+                    video_hiddens = out
 
                 video_hiddens = tree_map_tensor(lambda t: t.to(self.device).float(), video_hiddens) # maybe bfloat to float32
 
                 video_hiddens = tree_map_tensor(lambda t: pack_with_inverse(t, 'b * d')[0], video_hiddens)
+
+                if exists(context_mask):
+                    context_mask = context_mask.to(self.device)
+
+                    if has_multi_view:
+                        context_mask = rearrange(context_mask, '(b v) n -> b (v n)', v = num_views)
 
                 if has_multi_view and exists(self.view_emb):
 
@@ -1100,10 +1115,13 @@ class MimicVideo(Module):
         if exists(intermediates):
             cache = default(cache, intermediates.cache)
 
-        prev_self_kv, prev_gru_hidden, prev_seq_len, cached_video_hiddens = cache if exists(cache) else ((None,) * self.depth, None, 0, None)
+        prev_self_kv, prev_gru_hidden, prev_seq_len, cached_video_hiddens, cached_context_mask = cache if exists(cache) else ((None,) * self.depth, None, 0, None, None)
 
         if exists(cached_video_hiddens):
             video_hiddens = cached_video_hiddens
+
+        if exists(cached_context_mask):
+            context_mask = cached_context_mask
 
         next_cached_self_attn_kv = []
 
@@ -1451,6 +1469,6 @@ class MimicVideo(Module):
         if is_explorative:
             joint_state_latent = select_best(joint_state_latent)
 
-        cache = Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + seq_len, video_hiddens)
+        cache = Cache(next_cached_self_attn_kv, gru_hidden, prev_seq_len + seq_len, video_hiddens, context_mask)
 
         return out, Intermediates(cache, joint_state_latent, losses)

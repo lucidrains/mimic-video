@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -285,7 +286,9 @@ class CosmosPredictWrapper(Module):
         timestep: float | Tensor | None = None,
         predict_num_future_latents = 0, # number of future frames to predict at inference - presumably the given video will be fixed at T = 0, with the future predicted frames at T = 1
         video_flow_target_tau: float = 1.0,
-        inference_steps: int = 10
+        inference_steps: int = 10,
+        video_frames_mask = None, # (b, f) | (f,) bool - latent video frames the action tower attends to - kept clean during training, everything else denoised
+        context_frames = 0 # shorthand for the leading `context_frames` frames (in pixels)
     ) -> Tensor | list[Tensor]:
 
         batch = videos.shape[0]
@@ -309,6 +312,23 @@ class CosmosPredictWrapper(Module):
         latents = self.vae.encode(videos).latent_dist.sample()
 
         latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
+
+        num_latent_frames = latents.shape[2]
+
+        if context_frames > 0:
+            assert not exists(video_frames_mask), 'give either `context_frames` or `video_frames_mask`, not both'
+
+            context_latent_frames = math.ceil(context_frames / self.vae_temporal_compression_ratio)
+            video_frames_mask = lens_to_mask(tensor([context_latent_frames]), num_latent_frames)
+            video_frames_mask = repeat(video_frames_mask, '1 f -> b f', b = batch)
+
+        if exists(video_frames_mask):
+            if video_frames_mask.ndim == 1:
+                video_frames_mask = repeat(video_frames_mask, 'f -> b f', b = batch)
+
+            video_frames_mask = video_frames_mask.to(self.device)
+
+            assert video_frames_mask.shape == (batch, num_latent_frames), f'`video_frames_mask` must be of shape (batch, {num_latent_frames}) or ({num_latent_frames},)'
 
         # handle the video denoising times
 
@@ -336,8 +356,7 @@ class CosmosPredictWrapper(Module):
 
             noise = torch.randn_like(latents)
 
-            frames = latents.shape[2]
-            padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = frames)
+            padded_timestep = repeat(timestep, 'b -> b 1 f 1 1', f = num_latent_frames)
 
 
             # train time fixed video prefixing logic - same as train time RTC from Black et al. https://arxiv.org/abs/2512.05964
@@ -346,10 +365,14 @@ class CosmosPredictWrapper(Module):
 
             if not is_inference and self.training and self.train_fixed_video_prefix:
                 rand_prefix_len = torch.randint(0, self.train_fixed_video_prefix_max_delay, (batch,), device = self.device)
-                fixed_prefix_mask = lens_to_mask(rand_prefix_len, frames)
+                fixed_prefix_mask = lens_to_mask(rand_prefix_len, num_latent_frames)
 
                 fixed_prefix_mask = rearrange(fixed_prefix_mask, 'b f -> b 1 f 1 1')
                 padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', fixed_prefix_mask, 0., padded_timestep)
+
+            if exists(video_frames_mask):
+                frame_mask = rearrange(video_frames_mask, 'b f -> b 1 f 1 1')
+                padded_timestep = einx.where('b 1 f 1 1, , b 1 f 1 1 -> b 1 f 1 1', frame_mask, 0., padded_timestep)
 
             noisy_latents = torch.lerp(latents, noise, padded_timestep)
 
@@ -380,7 +403,34 @@ class CosmosPredictWrapper(Module):
 
         hiddens = self.cached_hidden_states[:len(self.extract_layers)]
 
+        if exists(video_frames_mask):
+            context_mask = self.get_context_mask(hiddens[0], latents, video_frames_mask)
+            return (hiddens, context_mask) if self.return_list else (hiddens[0], context_mask)
+
         return hiddens if self.return_list else hiddens[0]
+
+    def get_context_mask(
+        self,
+        hidden: Tensor,
+        latents: Tensor,
+        video_frames_mask: Tensor
+    ) -> Tensor:
+        batch, seq_len, _ = hidden.shape
+        _, _, _, latent_height, latent_width = latents.shape
+
+        p_h, p_w = self.transformer.config.patch_size[1], self.transformer.config.patch_size[2]
+        rows_per_frame = (latent_height // p_h) * (latent_width // p_w)
+
+        context_mask = repeat(video_frames_mask, 'b f -> b (f r)', r = rows_per_frame)
+
+        num_attended_rows = context_mask.shape[-1]
+        device = context_mask.device
+
+        if num_attended_rows < seq_len: # future frames appended at inference, masked out
+            num_future_rows = seq_len - num_attended_rows
+            context_mask = cat((context_mask, torch.zeros(batch, num_future_rows, dtype = torch.bool, device = device)), dim = -1)
+
+        return context_mask
 
     def finetune(
         self,
