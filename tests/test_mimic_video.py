@@ -13,7 +13,7 @@ def test_mimic_video(
     action_stats_given,
     condition_tokens_given,
 ):
-    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.mimic_video import MimicVideo, sample_flow_times
 
     video_hiddens = torch.randn(2, 64, 77)
     video_mask = torch.randint(0, 2, (2, 64)).bool()
@@ -47,6 +47,13 @@ def test_mimic_video(
     loss = mimic_video(actions = actions, **forward_kwargs)
 
     assert loss.numel() == 1
+    assert not torch.isnan(loss) # ensure sampled times never nan
+
+    # ensure sampled times are truncated at 0.999, never nan
+
+    times = mimic_video.sample_time_fn(sample_flow_times(1000, s = mimic_video.sample_time_s))
+    assert not torch.isnan(times).any()
+    assert times.max() <= mimic_video.sample_time_s
 
     flow = mimic_video(actions = actions, **forward_kwargs, time = torch.tensor([0.5, 0.5]))
 
@@ -236,7 +243,8 @@ def test_lora_e2e():
 @param('use_minto', (False, True))
 @param('expectile_tau', (0.1, 0.5))
 @param('n_step_returns', (False, True))
-def test_latent_steering(use_minto, expectile_tau, n_step_returns):
+@param('use_hl_gauss', (False, True))
+def test_latent_steering(use_minto, expectile_tau, n_step_returns, use_hl_gauss):
     from mimic_video.mimic_video import MimicVideo
     from mimic_video.cosmos_predict import CosmosPredictWrapper
     from mimic_video.flow_steering import FlowSteering
@@ -253,7 +261,7 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns):
 
     # wrap model with diffusion steering
 
-    model = FlowSteering(model, use_minto = use_minto, expectile_tau = expectile_tau)
+    model = FlowSteering(model, use_minto = use_minto, expectile_tau = expectile_tau, use_hl_gauss = use_hl_gauss)
 
     # states
 
@@ -294,6 +302,88 @@ def test_latent_steering(use_minto, expectile_tau, n_step_returns):
     )
 
     assert actions.shape == (1, 32, 20)
+
+@param('n_step_returns', (False, True))
+@param('done', (False, True))
+def test_q_planning(n_step_returns, done):
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.cosmos_predict import CosmosPredictWrapper
+    from mimic_video.q_planning import QPlanner
+
+    video_wrapper = CosmosPredictWrapper(
+        extract_layer = 1,
+        random_weights = True,
+        tiny = True
+    )
+
+    model = MimicVideo(512, video_wrapper)
+
+    planner = QPlanner(model)
+
+    video = torch.rand(2, 5, 3, 32, 32) # 5 frames, 3 channels, 32 x 32
+
+    joint_state = torch.randn(2, 32)
+
+    actions = torch.randn(2, 32, 20)
+    next_actions = torch.randn(2, 32, 20)
+    rewards = torch.randn(2, 4) if n_step_returns else torch.randn(2)
+
+    done_mask = None
+    if done:
+        done_mask = torch.randint(0, 2, (2, 4)).bool() if n_step_returns else torch.randint(0, 2, (2,)).bool()
+
+    # training - SARSA style, bootstrapping on the behavior next actions
+
+    critic_loss = planner(
+        prompts = [
+            'put the package on the conveyer belt',
+            'pass the butter'
+        ],
+        video = video,
+        joint_state = joint_state,
+        actions = actions,
+        next_video = video,
+        next_joint_state = joint_state,
+        next_actions = next_actions,
+        rewards = rewards,
+        done = done_mask
+    )
+
+    critic_loss.backward()
+
+    # planning - repeat the video hiddens across candidate actions, score with the critic, softmax weighted sum
+
+    candidate_actions = torch.randn(1, 8, 32, 20)
+    video_hiddens = torch.randn(1, 64, 16)
+    context_mask = torch.ones(1, 64).bool()
+
+    planned_actions, weights, q_values = planner.plan(
+        prompts = 'peel the orange',
+        candidate_actions = candidate_actions,
+        joint_state = joint_state[:1],
+        video_hiddens = video_hiddens,
+        context_mask = context_mask,
+        return_all = True
+    )
+
+    assert planned_actions.shape == (1, 32, 20)
+    assert weights.shape == (1, 8)
+    assert q_values.shape == (1, 8)
+    assert torch.allclose(weights.sum(), torch.tensor(1.))
+    assert q_values.min() >= 0. and q_values.max() <= 1. # hl gauss bins on [0, 1]
+
+    # argmax mode
+
+    planned_actions = planner.plan(
+        prompts = 'peel the orange',
+        candidate_actions = candidate_actions,
+        joint_state = joint_state[:1],
+        video_hiddens = video_hiddens,
+        context_mask = context_mask,
+        mode = 'argmax'
+    )
+
+    assert planned_actions.shape == (1, 32, 20)
 
 def test_state_autoencoder():
     from mimic_video.mimic_video import MimicVideo, exists

@@ -5,6 +5,8 @@ from torch.nn import Module
 
 from mimic_video.mimic_video import MimicVideo
 
+from hl_gauss_pytorch import HLGaussLoss
+
 from ema_pytorch import EMA
 from assoc_scan import AssocScan
 
@@ -101,6 +103,11 @@ class FlowSteering(Module):
         inner_critic_loss_weight = 1.,
         use_minto = True,
         expectile_tau = 0.5,
+        use_hl_gauss = False,
+        hl_gauss_num_bins = 101,
+        hl_gauss_min_value = 0.,
+        hl_gauss_max_value = 1.,
+        hl_gauss_sigma_to_bin_ratio = 2.,
         ema_kwargs: dict | None = None
     ):
         super().__init__()
@@ -118,10 +125,24 @@ class FlowSteering(Module):
 
         self.actor = model.create_actor_from()
 
-        # critics
+        # critics - optionally with hl gauss categorical heads, as in the Q-planning paper
 
-        self.outer_critic = model.create_critic_from()
-        self.inner_critic = model.create_critic_from()
+        self.use_hl_gauss = use_hl_gauss
+
+        critic_kwargs = dict()
+
+        if use_hl_gauss:
+            self.hl_gauss_loss = HLGaussLoss(
+                hl_gauss_min_value,
+                hl_gauss_max_value,
+                hl_gauss_num_bins,
+                sigma_to_bin_ratio = hl_gauss_sigma_to_bin_ratio
+            )
+
+            critic_kwargs.update(num_bins = hl_gauss_num_bins)
+
+        self.outer_critic = model.create_critic_from(**critic_kwargs)
+        self.inner_critic = model.create_critic_from(**critic_kwargs)
 
         self.ema_outer_critic = EMA(self.outer_critic, beta = ema_decay, **ema_kwargs)
         self.ema_inner_critic = EMA(self.inner_critic, beta = ema_decay, **ema_kwargs)
@@ -159,6 +180,12 @@ class FlowSteering(Module):
     def update_critic_ema(self):
         self.ema_outer_critic.update()
         self.ema_inner_critic.update()
+
+    def maybe_decode_values(self, pred):
+        if not self.use_hl_gauss:
+            return pred
+
+        return self.hl_gauss_loss(pred)
 
     def sample(
         self,
@@ -203,7 +230,7 @@ class FlowSteering(Module):
 
         # actor loss
 
-        actor_loss = -self.inner_critic(*args, video = video, joint_state = joint_state, actions = noise_latents, **kwargs).mean()
+        actor_loss = -self.maybe_decode_values(self.inner_critic(*args, video = video, joint_state = joint_state, actions = noise_latents, **kwargs)).mean()
 
         # bellman for outer critic
 
@@ -211,10 +238,10 @@ class FlowSteering(Module):
             video = next_video, joint_state = next_joint_state, actions = next_actions, **kwargs
         )
 
-        next_pred_q = self.ema_outer_critic(*args, **next_critic_kwargs)
+        next_pred_q = self.maybe_decode_values(self.ema_outer_critic(*args, **next_critic_kwargs))
 
         if self.use_minto:
-            online_next_pred_q = self.outer_critic(*args, **next_critic_kwargs)
+            online_next_pred_q = self.maybe_decode_values(self.outer_critic(*args, **next_critic_kwargs))
             next_pred_q = torch.minimum(next_pred_q, online_next_pred_q)
 
         target_q = get_discounted_returns(rewards, next_pred_q, self.discount_factor, n_step_lens = n_step_lens, done = done)
@@ -222,19 +249,25 @@ class FlowSteering(Module):
         if target_q.ndim == 2:
             target_q = target_q[:, 0]
 
-        outer_critic_loss = expectile_l2_loss(
-            self.outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs),
-            target_q.detach(),
-            tau = self.expectile_tau
-        )
+        if self.use_hl_gauss:
+            outer_critic_loss = self.hl_gauss_loss(
+                self.outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs),
+                target_q.detach()
+            )
+        else:
+            outer_critic_loss = expectile_l2_loss(
+                self.outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs),
+                target_q.detach(),
+                tau = self.expectile_tau
+            )
 
         # tether the inner critic to the outer critic q estimation
         # main contribution of the paper
 
-        inner_target_q = self.ema_outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs)
+        inner_target_q = self.maybe_decode_values(self.ema_outer_critic(*args, video = video, joint_state = joint_state, actions = actions, **kwargs))
 
         inner_critic_loss = F.mse_loss(
-            self.inner_critic(*args, video = video, joint_state = joint_state, actions = noise_latents.detach(), **kwargs),
+            self.maybe_decode_values(self.inner_critic(*args, video = video, joint_state = joint_state, actions = noise_latents.detach(), **kwargs)),
             inner_target_q.detach()
         )
 

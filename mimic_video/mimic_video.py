@@ -114,11 +114,18 @@ class Normalizer(Module):
 
 # time
 
-# they follow p0's research finding with the beta distribution
-# lets stick with 0 noise to 1 data instead of the reverse
+# pi0 samples the flow matching timestep from a beta distribution, truncated above 0.999 - https://arxiv.org/abs/2410.24164
+# keep the sqrt approximation to the inverse cdf, 0 noise to 1 data
 
 def default_sample_time_fn(time, s = 0.999):
     return torch.sqrt(s - time)
+
+def sample_flow_times(batch_size, s = 0.999, device = None):
+    # truncated draw for the sqrt schedule above, so times are at most 0.999 and never nan
+
+    time = torch.rand(batch_size, device = device)
+    time = (s - s ** 2) + time * s ** 2
+    return time
 
 class RandomFourierEmbed(Module):
     def __init__(self, dim):
@@ -466,6 +473,7 @@ class MimicVideo(Module):
         dim_time_cond = None,
         pred_head: Module | None = None,
         sample_time_fn = None,
+        max_sample_steps = 1000,        # max flow matching time (0.999) is derived from this, also enforced at inference
         train_time_rtc = False,
         train_time_rtc_max_delay = None,
         action_mean_std: Tensor | None = None,
@@ -557,7 +565,9 @@ class MimicVideo(Module):
 
         # flow related
 
-        self.sample_time_fn = default(sample_time_fn, default_sample_time_fn)
+        self.sample_time_s = 1. - 1. / max_sample_steps
+        self.max_sample_steps = max_sample_steps
+        self.sample_time_fn = default(sample_time_fn, partial(default_sample_time_fn, s = self.sample_time_s))
 
         # one action -> token projection per embodiment
 
@@ -740,16 +750,22 @@ class MimicVideo(Module):
         actor_model.load_state_dict(self.state_dict(), strict = False)
         return Actor(actor_model)
 
-    def create_critic_from(self, **override_model_kwargs):
+    def create_critic_from(self, *, num_bins = None, **override_model_kwargs):
         kwargs = self._init_kwargs.copy()
 
         dim = kwargs['dim']
 
-        pred_head = nn.Sequential(
-            Reduce('b n d -> b d', 'mean'),
-            LinearNoBias(dim, 1),
-            Rearrange('b 1 -> b')
-        )
+        if exists(num_bins):
+            pred_head = nn.Sequential(
+                Reduce('b n d -> b d', 'mean'),
+                LinearNoBias(dim, num_bins)
+            )
+        else:
+            pred_head = nn.Sequential(
+                Reduce('b n d -> b d', 'mean'),
+                LinearNoBias(dim, 1),
+                Rearrange('b 1 -> b')
+            )
 
         kwargs.update(
             is_flow_model = False,
@@ -788,6 +804,7 @@ class MimicVideo(Module):
         **kwargs
     ):
         assert predict_num_future_latents > 0
+        assert steps <= self.max_sample_steps, f'`steps` must be at most `max_sample_steps` ({self.max_sample_steps})'
 
         if return_rl_token:
             assert num_cached_steps >= 1, '`num_cached_steps` must be at least 1 if `return_rl_token` is given'
@@ -1090,7 +1107,7 @@ class MimicVideo(Module):
         if is_training and is_flow_model:
 
             if not exists(time):
-                time = torch.rand((batch,), device = device)
+                time = sample_flow_times(batch, s = self.sample_time_s, device = device)
                 time = self.sample_time_fn(time)
 
             time = expand_candidates(time)

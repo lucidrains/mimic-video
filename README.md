@@ -334,3 +334,15 @@ That's it
     url     = {https://arxiv.org/abs/2607.27372},
 }
 ```
+
+```bibtex
+@misc{giridhar2026beyondimitationselfimprovingrobot,
+    title   = {Beyond Imitation: Self-Improving Robot Policies via Off-Policy Q-Planning},
+    author  = {Varun Giridhar and Anant Khandelwal and Jeremy A. Collins and Ignat Georgiev and Animesh Garg},
+    year    = {2026},
+    eprint  = {2608.21204},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.RO},
+    url     = {https://arxiv.org/abs/2608.21204},
+}
+```
