@@ -542,6 +542,33 @@ def test_mimic_video_unreduced_loss():
     assert loss_reduced.ndim == 0
     assert torch.allclose(loss_unreduced.mean(), loss_reduced, atol = 1e-4)
 
+@param('body_cond_mode', ('none', 'embedding', 'external'))
+def test_body_cond(body_cond_mode):
+    from mimic_video.mimic_video import MimicVideo
+
+    init_kwargs = dict(dim = 256, dim_video_hidden = 64)
+
+    forward_kwargs = dict(
+        actions = torch.randn(2, 32, 20),
+        joint_state = torch.randn(2, 32),
+        video_hiddens = torch.randn(2, 16, 64)
+    )
+
+    if body_cond_mode == 'embedding':
+        init_kwargs.update(num_body_ids = 3)
+    elif body_cond_mode == 'external':
+        init_kwargs.update(dim_body_cond = 32)
+        forward_kwargs.update(body_cond = torch.randn(2, 32))
+
+    model = MimicVideo(**init_kwargs)
+
+    loss = model(**forward_kwargs)
+    loss.backward()
+    assert loss.numel() == 1
+
+    flow = model(**forward_kwargs, time = torch.tensor([0.5, 0.5]))
+    assert flow.shape == forward_kwargs['actions'].shape
+
 @param('num_registers', (0, 4))
 def test_register_tokens(num_registers):
     from mimic_video.mimic_video import MimicVideo

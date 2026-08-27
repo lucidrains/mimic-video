@@ -482,6 +482,8 @@ class MimicVideo(Module):
         num_task_ids = 0,
         num_advantage_ids = 0,
         advantage_cfg_dropout = 0.25,
+        num_body_ids = 0,
+        dim_body_cond = None,
         extracted_video_layer_indices: list[int] | None = None,
         num_video_viewpoints = 1,
         video_time_denoise_mu = 0.,
@@ -677,6 +679,9 @@ class MimicVideo(Module):
         assert advantage_cfg_dropout > 0.
 
         self.advantage_cfg_dropout = advantage_cfg_dropout
+
+        self.body_embed = nn.Embedding(num_body_ids, dim) if num_body_ids > 0 else None
+        self.to_body_cond = nn.Linear(dim_body_cond, dim) if exists(dim_body_cond) else None
 
         # allow for researchers to explore beyond just one layer of pretrained
         # we should also open up research into multiple pretrained models eventually
@@ -906,6 +911,7 @@ class MimicVideo(Module):
         task_ids = None,                # (b)
         advantage_ids = None,           # (b)
         dropout_advantage_ids = False,
+        body_cond = None,               # (b de) - external body cond, e.g. GNN embed of URDF
         video = None,                   # (b t c h w)
         audio = None,                   # (b s) | (b c s) - optional audio waveform from minimax h3
         video_hiddens = None,           # (b nv dv) - they use layer 19 of cosmos predict, at first denoising step. that's all
@@ -1071,6 +1077,7 @@ class MimicVideo(Module):
             joint_state,
             task_ids,
             advantage_ids,
+            body_cond,
             context_mask,
             video_hiddens,
             time_video_denoise,
@@ -1081,6 +1088,7 @@ class MimicVideo(Module):
             joint_state,
             task_ids,
             advantage_ids,
+            body_cond,
             context_mask,
             video_hiddens,
             time_video_denoise,
@@ -1223,13 +1231,32 @@ class MimicVideo(Module):
 
             advantage_embed = self.advantage_embed(advantage_ids)
 
+        # body cond - learned embedding of `body_id` or external token
+
+        body_cond_embed = empty_token
+
+        assert not (exists(body_cond) and exists(self.body_embed)), 'cannot give `body_cond` when `num_body_ids` is set, use one or the other'
+
+        if exists(self.body_embed):
+            body_cond_embed = einx.get_at('[n] d, -> d', self.body_embed.weight, body_id)
+            body_cond_embed = repeat(body_cond_embed, 'd -> b 1 d', b = batch)
+        elif exists(body_cond):
+            assert exists(self.to_body_cond)
+            body_cond_embed = self.to_body_cond(body_cond)
+
         # determine time - need to handle the sequence dimension given train time RTC and various conditioning tokens
 
         time_cond = None
 
         if exists(time):
             if times.ndim == 3:
-                prefix_len = 1 + int(exists(advantage_ids)) + int(exists(task_ids)) + self.num_register_tokens
+                prefix_len = (
+                    1
+                    + int(exists(advantage_ids))
+                    + int(exists(task_ids))
+                    + int(exists(self.body_embed) or exists(body_cond))
+                    + self.num_register_tokens
+                )
 
                 times = pad_at_dim(times, (prefix_len, 0), dim = 1, value = 1.) # handle joint state token on the action
 
@@ -1244,7 +1271,7 @@ class MimicVideo(Module):
 
         # pack with action tokens for attention tower
 
-        tokens, inverse_pack = pack_with_inverse((advantage_embed, task_embed, joint_state_token, register_tokens, tokens), 'b * d')
+        tokens, inverse_pack = pack_with_inverse((body_cond_embed, advantage_embed, task_embed, joint_state_token, register_tokens, tokens), 'b * d')
 
         # transformer layers
 
@@ -1312,9 +1339,9 @@ class MimicVideo(Module):
 
         tokens = self.final_attn_agg(layer_outputs)
 
-        # remove joint token and register tokens
+        # remove body, joint token and register tokens
 
-        _, _, joint_token_out, _, tokens = inverse_pack(tokens)
+        _, _, _, joint_token_out, _, tokens = inverse_pack(tokens)
 
         # embed
 
