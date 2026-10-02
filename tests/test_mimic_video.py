@@ -234,6 +234,48 @@ def test_multiple_embodiments():
 
         assert sampled.shape == (1, 32, model.embodiment_action_dims[body_id])
 
+@param('action_stats_given', (False, True))
+def test_action_to_noise_latents(action_stats_given):
+    from mimic_video.mimic_video import MimicVideo
+
+    action_mean_std = torch.ones((2, 20)) if action_stats_given else None
+
+    model = MimicVideo(
+        dim = 256,
+        dim_video_hidden = 64,
+        depth = 2,
+        model_output_clean = False,
+        action_mean_std = action_mean_std
+    )
+
+    actions = torch.randn(2, 32, 20)
+    joint_state = torch.randn(2, 32)
+    video_hiddens = torch.randn(2, 16, 64)
+
+    # reverse flow ode - action to noise latent
+
+    latents = model.action_to_noise_latents(
+        actions,
+        steps = 2,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        disable_progress_bar = True
+    )
+
+    assert latents.shape == actions.shape
+
+    # latents feed right back into sampling
+
+    sampled = model.sample(
+        steps = 2,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        noise_latents = latents,
+        disable_progress_bar = True
+    )
+
+    assert sampled.shape == actions.shape
+
 def test_lora_e2e():
     import os
     import shutil

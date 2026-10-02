@@ -835,10 +835,7 @@ class MimicVideo(Module):
             prefix_len = prefix_action_chunk.shape[1]
             assert prefix_len < self.action_chunk_len
 
-            maybe_normed_prefix = prefix_action_chunk
-
-            if exists(normalizer):
-                maybe_normed_prefix = normalizer.normalize(prefix_action_chunk)
+            maybe_normed_prefix = normalizer.normalize(prefix_action_chunk) if exists(normalizer) else prefix_action_chunk
 
             times = repeat(times, 'steps -> steps b n', b = batch_size, n = self.action_chunk_len).clone()
             times[..., :prefix_len] = 1.
@@ -850,28 +847,19 @@ class MimicVideo(Module):
         if not exists(noise_latents):
             noise_latents = torch.randn(action_shape, device = self.device)
 
-        # denoised action starts as noise
-
-        denoised = noise_latents
-
-        intermediates = None
-
         # denoise
-        # the kv and gru cache is only accumulated over the very last denoising steps
 
-        for step_idx, time in enumerate(tqdm(times, disable = disable_progress_bar)):
-
-            if inpainting:
-                denoised[:, :prefix_len] = maybe_normed_prefix
-
-            cache_accumulation_step = step_idx >= (steps - num_cached_steps)
-
-            if cache_accumulation_step:
-                pred_flow, intermediates = self.forward(actions = denoised, time = time, body_id = body_id, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
-            else:
-                pred_flow = self.forward(actions = denoised, time = time, body_id = body_id, predict_num_future_latents = predict_num_future_latents, **kwargs)
-
-            denoised = denoised + delta * pred_flow
+        denoised, intermediates = self._flow_ode_solve(
+            noise_latents,
+            times,
+            delta,
+            body_id = body_id,
+            num_cached_steps = num_cached_steps,
+            predict_num_future_latents = predict_num_future_latents,
+            disable_progress_bar = disable_progress_bar,
+            prefix = (maybe_normed_prefix, prefix_len) if inpainting else None,
+            **kwargs
+        )
 
         # handle action inverse norm
 
@@ -891,6 +879,70 @@ class MimicVideo(Module):
         rl_token = self.get_state_tokens(intermediates.cache.video_hiddens)
 
         return denoised, rl_token
+
+    def _flow_ode_solve(
+        self,
+        denoised,
+        times,
+        delta,
+        *,
+        body_id = 0,
+        num_cached_steps = 1,
+        predict_num_future_latents = 1,
+        disable_progress_bar = False,
+        prefix = None,
+        **kwargs
+    ):
+        prefix_actions, prefix_len = default(prefix, (None, 0))
+
+        intermediates = None
+
+        for step_idx, time in enumerate(tqdm(times, disable = disable_progress_bar)):
+
+            if exists(prefix_actions):
+                denoised[:, :prefix_len] = prefix_actions
+
+            cache_accumulation_step = step_idx >= (len(times) - num_cached_steps)
+
+            if cache_accumulation_step:
+                pred_flow, intermediates = self.forward(actions = denoised, time = time, body_id = body_id, intermediates = intermediates, predict_num_future_latents = predict_num_future_latents, return_intermediates = True, **kwargs)
+            else:
+                pred_flow = self.forward(actions = denoised, time = time, body_id = body_id, predict_num_future_latents = predict_num_future_latents, **kwargs)
+
+            denoised = denoised + delta * pred_flow
+
+        return denoised, intermediates
+
+    @torch.no_grad()
+    @temp_eval
+    def action_to_noise_latents(
+        self,
+        actions,                   # (b na d) - raw actions, as returned by `sample`
+        steps = 16,
+        body_id = 0,
+        **kwargs
+    ):
+        assert not self.model_output_clean, 'reverse flow ode requires velocity prediction (`model_output_clean = False`)'
+        assert steps <= self.max_sample_steps, f'`steps` must be at most `max_sample_steps` ({self.max_sample_steps})'
+
+        body_id = int(body_id)
+
+        if exists(self.action_normalizer):
+            actions = self.action_normalizer[body_id].normalize(actions)
+
+        # reverse flow ode - clean action at time 1 back to noise at time 0
+
+        times = torch.linspace(1., 0., steps + 1, device = self.device)[:-1]
+
+        latents, _ = self._flow_ode_solve(
+            actions,
+            times,
+            delta = -1. / steps,
+            body_id = body_id,
+            **kwargs
+        )
+
+        return latents
 
     @torch.no_grad()
     @temp_eval
