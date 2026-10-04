@@ -276,6 +276,111 @@ def test_action_to_noise_latents(action_stats_given):
 
     assert sampled.shape == actions.shape
 
+def test_flow_dagger():
+    from mimic_video.mimic_video import MimicVideo
+    from mimic_video.flow_dagger import FlowDagger
+
+    model = MimicVideo(
+        dim = 256,
+        dim_video_hidden = 64,
+        depth = 2,
+        model_output_clean = False
+    )
+
+    video_hiddens = torch.randn(4, 16, 64)
+    joint_state = torch.randn(4, 32)
+    expert_actions = torch.randn(4, 32, 20)
+
+    # action inversion round trips back to the expert actions
+
+    noise_latents = model.action_to_noise_latents(
+        expert_actions,
+        steps = 4,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        disable_progress_bar = True
+    )
+
+    recon = model.sample(
+        steps = 4,
+        joint_state = joint_state,
+        video_hiddens = video_hiddens,
+        noise_latents = noise_latents,
+        disable_progress_bar = True
+    )
+
+    assert (recon - expert_actions).abs().mean() < 1e-2
+
+    # flow dagger - regress the actor onto inverted expert latents
+
+    dagger = FlowDagger(model, inversion_steps = 4)
+
+    loss = dagger(
+        video_hiddens = video_hiddens,
+        joint_state = joint_state,
+        actions = expert_actions,
+        disable_progress_bar = True
+    )
+
+    loss.backward()
+
+    # train the actor on the precomputed targets, as from a replay buffer
+
+    targets = noise_latents.detach()
+
+    optimizer = torch.optim.Adam(dagger.actor.parameters(), lr = 1e-3)
+
+    initial_loss = dagger(
+        video_hiddens = video_hiddens,
+        joint_state = joint_state,
+        noise_latents = targets
+    ).item()
+
+    for _ in range(64):
+        loss = dagger(
+            video_hiddens = video_hiddens,
+            joint_state = joint_state,
+            noise_latents = targets
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    assert loss.item() < initial_loss * 0.5
+
+    # sample from the learned noise latents
+
+    sampled, sampled_latents = dagger.sample(
+        video_hiddens = video_hiddens,
+        joint_state = joint_state,
+        steps = 4
+    )
+
+    assert sampled.shape == expert_actions.shape
+    assert sampled_latents.shape == noise_latents.shape
+
+    # reuse the same actor network as flow steering
+
+    from mimic_video.flow_steering import FlowSteering
+
+    steering = FlowSteering(model, use_minto = False, use_hl_gauss = False)
+    dagger = FlowDagger(model, steering = steering, inversion_steps = 4)
+
+    assert dagger.actor is steering.actor
+
+    loss = dagger(
+        video_hiddens = video_hiddens,
+        joint_state = joint_state,
+        noise_latents = targets
+    )
+
+    loss.backward()
+
+    actor_grads = [p.grad for p in dagger.actor.parameters() if p.grad is not None]
+    assert len(actor_grads) > 0
+    assert all(not torch.isnan(g).any() for g in actor_grads)
+
 def test_lora_e2e():
     import os
     import shutil

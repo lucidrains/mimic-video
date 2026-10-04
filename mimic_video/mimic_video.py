@@ -920,27 +920,33 @@ class MimicVideo(Module):
         actions,                   # (b na d) - raw actions, as returned by `sample`
         steps = 16,
         body_id = 0,
+        inversion_fixed_point_steps = 5,    # fixed point iters per euler step, from flow dagger paper
+        disable_progress_bar = False,
         **kwargs
     ):
         assert not self.model_output_clean, 'reverse flow ode requires velocity prediction (`model_output_clean = False`)'
         assert steps <= self.max_sample_steps, f'`steps` must be at most `max_sample_steps` ({self.max_sample_steps})'
+        assert inversion_fixed_point_steps >= 1
 
         body_id = int(body_id)
 
         if exists(self.action_normalizer):
             actions = self.action_normalizer[body_id].normalize(actions)
 
-        # reverse flow ode - clean action at time 1 back to noise at time 0
+        # fixed point per euler step - x_k = x_{k+1} - dt * v(x_k, t_k)
+        # explicit reverse too coarse for few step flow heads - https://arxiv.org/abs/2607.08877
 
-        times = torch.linspace(1., 0., steps + 1, device = self.device)[:-1]
+        batch = actions.shape[0]
+        delta = 1. / steps
+        latents = actions
 
-        latents, _ = self._flow_ode_solve(
-            actions,
-            times,
-            delta = -1. / steps,
-            body_id = body_id,
-            **kwargs
-        )
+        for step_idx in tqdm(reversed(range(steps)), disable = disable_progress_bar):
+            time = torch.full((batch,), step_idx / steps, device = self.device)
+            target = latents
+
+            for _ in range(inversion_fixed_point_steps):
+                pred_flow = self.forward(actions = latents, time = time, body_id = body_id, **kwargs)
+                latents = target - delta * pred_flow
 
         return latents
 
