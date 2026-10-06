@@ -17,6 +17,7 @@ import einx
 from transformers import T5EncoderModel, T5TokenizerFast, T5Config
 
 from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean
+from torch_einops_utils.shape import size
 
 from mimic_video.utils import exists, default, check_import
 
@@ -291,7 +292,7 @@ class CosmosPredictWrapper(Module):
         context_frames = 0 # shorthand for the leading `context_frames` frames (in pixels)
     ) -> Tensor | list[Tensor]:
 
-        batch = videos.shape[0]
+        batch = size(videos, '[b] ...')
         videos = self.normalize(videos)
 
         if isinstance(prompts, str): prompts = [prompts] * batch
@@ -313,7 +314,7 @@ class CosmosPredictWrapper(Module):
 
         latents = (latents - self.latents_mean.to(latents.device)) / self.latents_std.to(latents.device)
 
-        num_latent_frames = latents.shape[2]
+        num_latent_frames = size(latents, 'b c [f] ...')
 
         if context_frames > 0:
             assert not exists(video_frames_mask), 'give either `context_frames` or `video_frames_mask`, not both'
@@ -338,7 +339,7 @@ class CosmosPredictWrapper(Module):
             if timestep.ndim == 0:
                 timestep = rearrange(timestep, '-> 1')
 
-            num_timesteps = timestep.shape[0]
+            num_timesteps = size(timestep, '[b] ...')
 
             if num_timesteps != batch:
                 timestep = repeat(timestep, '1 -> b', b = batch)
@@ -386,7 +387,7 @@ class CosmosPredictWrapper(Module):
         else:
             # conditioning on time=0 for prefix (clean), and time=999 for future (noise)
 
-            num_prefix_frames = latents.shape[2]
+            num_prefix_frames = size(latents, 'b c [f] ...')
 
             pred_shape = shape_with_replace(latents, {2: predict_num_future_latents})
             future_noise = torch.randn(pred_shape, device = latents.device)
@@ -423,7 +424,7 @@ class CosmosPredictWrapper(Module):
 
         context_mask = repeat(video_frames_mask, 'b f -> b (f r)', r = rows_per_frame)
 
-        num_attended_rows = context_mask.shape[-1]
+        num_attended_rows = size(context_mask, '... [n]')
         device = context_mask.device
 
         if num_attended_rows < seq_len: # future frames appended at inference, masked out
@@ -476,7 +477,7 @@ class CosmosPredictWrapper(Module):
                 # clear the hook cache - the transformer forward hooks would otherwise accumulate hidden states across batches
                 self.cached_hidden_states.clear()
 
-                batch = videos.shape[0]
+                batch = size(videos, '[b] ...')
                 videos = self.normalize(videos)
                 videos = rearrange(videos, 'b t c h w -> b c t h w').to(device)
 
@@ -495,7 +496,7 @@ class CosmosPredictWrapper(Module):
 
                 noise = torch.randn_like(latents)
 
-                frames = latents.shape[2]
+                frames = size(latents, 'b c [f] ...')
                 padded_ts = repeat(ts, 'b -> b 1 f 1 1', f = frames)
 
                 noisy_latents = torch.lerp(latents, noise, padded_ts)

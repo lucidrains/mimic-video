@@ -12,6 +12,7 @@ from assoc_scan import AssocScan
 
 from einops import rearrange
 from torch_einops_utils import lens_to_mask, temp_eval
+from torch_einops_utils.shape import size
 
 # functions
 
@@ -38,7 +39,7 @@ def get_discounted_returns(
 
         return rewards + discount_factor * last_q
 
-    max_n_steps = rewards.shape[-1]
+    max_n_steps = size(rewards, '... [n]')
 
     if exists(done):
         assert done.shape == rewards.shape

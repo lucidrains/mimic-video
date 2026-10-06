@@ -13,6 +13,7 @@ from torch.nn.functional import interpolate
 from torch.utils.data import Dataset, DataLoader
 
 from mimic_video.utils import exists, check_import
+from torch_einops_utils.shape import size
 
 # constants
 
@@ -105,8 +106,8 @@ class LiberoDataset(Dataset):
 
         # dimensions for the model
 
-        self.dim_joint_state = self.episodes[0].states.shape[-1]
-        self.dim_action = self.episodes[0].actions.shape[-1]
+        self.dim_joint_state = size(self.episodes[0].states, '... [d]')
+        self.dim_action = size(self.episodes[0].actions, '... [d]')
 
         # all valid chunk positions, so the sampled window fits within the episode
 
@@ -115,7 +116,7 @@ class LiberoDataset(Dataset):
         self.indices = []
 
         for episode_idx, episode in enumerate(self.episodes):
-            num_states = episode.states.shape[0]
+            num_states = size(episode.states, '[n] ...')
             self.indices.extend(
                 (episode_idx, start) for start in range(num_states - window + 1)
             )
@@ -138,7 +139,7 @@ class LiberoDataset(Dataset):
                     frame = frame.to_ndarray(format = 'rgb24')
                     frames.append(torch.from_numpy(frame).float() / 255.)
 
-            num_states = episode.states.shape[0]
+            num_states = size(episode.states, '[n] ...')
             frames = stack(frames)[:num_states]
             frames = rearrange(frames, 't h w c -> t c h w')
 

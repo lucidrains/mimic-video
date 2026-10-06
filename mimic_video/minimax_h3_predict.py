@@ -16,6 +16,7 @@ from einops import rearrange, repeat
 import einx
 
 from torch_einops_utils import shape_with_replace, lens_to_mask, masked_mean, temp_eval
+from torch_einops_utils.shape import shape, size
 
 from mimic_video.utils import exists, default, check_import
 
@@ -306,7 +307,7 @@ class MiniMaxH3PredictWrapper(Module):
 
             hiddens = self.text_encoder(input_ids = input_ids).last_hidden_state
             hiddens = self.text_proj(hiddens)
-            return hiddens, torch.ones(hiddens.shape[1], dtype = torch.long, device = device)
+            return hiddens, torch.ones(size(hiddens, 'b [n] ...'), dtype = torch.long, device = device)
 
         if exists(prompt_token_ids):
             ids_list = [ids.tolist() for ids in prompt_token_ids]
@@ -334,7 +335,7 @@ class MiniMaxH3PredictWrapper(Module):
         )
 
         hiddens = outputs.hidden_states[self.text_encoder_layer]
-        return hiddens, torch.ones(hiddens.shape[1], dtype = torch.long, device = device)
+        return hiddens, torch.ones(size(hiddens, 'b [n] ...'), dtype = torch.long, device = device)
 
     # audio encoding
 
@@ -390,7 +391,7 @@ class MiniMaxH3PredictWrapper(Module):
         device = self.device
         patch_h, patch_w = self.patch_size[1], self.patch_size[2]
         rows_per_frame = (latent_height // patch_h) * (latent_width // patch_w)
-        num_text_tokens = text_token_tags.shape[0]
+        num_text_tokens = size(text_token_tags, '[n] ...')
         num_video_rows = num_latent_frames * rows_per_frame
         num_audio_rows = num_audio_latents * self.audio_channels
         sequence_length = num_text_tokens + num_audio_rows + num_video_rows
@@ -459,7 +460,7 @@ class MiniMaxH3PredictWrapper(Module):
         batch, _, num_latent_frames, latent_height, latent_width = latents.shape
 
         has_audio = exists(audio_rows)
-        num_audio_latents = audio_rows.shape[1] // self.audio_channels if has_audio else 0
+        num_audio_latents = size(audio_rows, 'b [n] ...') // self.audio_channels if has_audio else 0
 
         position_ids, token_tags, video_indices, audio_indices, text_indices = self._build_layout(text_token_tags, num_latent_frames, latent_height, latent_width, num_audio_latents)
 
@@ -473,10 +474,10 @@ class MiniMaxH3PredictWrapper(Module):
         per_row_ts = repeat(timestep[:, 0, :, 0, 0], 'b f -> b (f r)', r = rows_per_frame)
 
         base_ts = per_row_ts[0, -1]
-        num_text_tokens = text_token_tags.shape[0]
-        num_audio_rows = audio_indices.shape[0]
+        num_text_tokens = size(text_token_tags, '[n] ...')
+        num_audio_rows = size(audio_indices, '[n] ...')
 
-        num_video_rows = video_indices.shape[0]
+        num_video_rows = size(video_indices, '[n] ...')
 
         row_timesteps = torch.full((num_text_tokens + num_audio_rows + num_video_rows,), base_ts, dtype = torch.float32, device = self.device)
 
@@ -606,7 +607,7 @@ class MiniMaxH3PredictWrapper(Module):
         noised_audio = None
 
         if exists(audio_rows):
-            audio_ts = repeat(timestep, 'b -> b n 1', n = audio_rows.shape[1])
+            audio_ts = repeat(timestep, 'b -> b n 1', n = size(audio_rows, 'b [n] ...'))
             noised_audio = torch.lerp(audio_rows, audio_noise, audio_ts)
 
         self._transformer_forward(noisy_latents, encoder_states, transformer_timestep, text_token_tags, audio_rows = noised_audio)
@@ -631,7 +632,7 @@ class MiniMaxH3PredictWrapper(Module):
         context_frames = 0 # shorthand for the leading `context_frames` frames (in pixels)
     ) -> Tensor | list[Tensor]:
 
-        batch = videos.shape[0]
+        batch = size(videos, '[b] ...')
         if isinstance(prompts, str): prompts = [prompts] * batch
 
         self.cached_hidden_states.clear()
@@ -689,7 +690,7 @@ class MiniMaxH3PredictWrapper(Module):
                 timestep = cast_tensor(timestep, device = self.device)
                 if timestep.ndim == 0:
                     timestep = rearrange(timestep, '-> 1')
-                num_timesteps = timestep.shape[0]
+                num_timesteps = size(timestep, '[b] ...')
 
                 if num_timesteps != batch:
                     timestep = repeat(timestep, '1 -> b', b = batch)
@@ -714,7 +715,7 @@ class MiniMaxH3PredictWrapper(Module):
                 hiddens = [cat([per_item_hiddens[j][k] for j in range(batch)], dim = 0) for k in range(len(self.extract_layers))]
 
         else:
-            num_prefix_frames = latents.shape[2]
+            num_prefix_frames = size(latents, 'b c [f] ...')
 
             pred_shape = shape_with_replace(latents, {2: predict_num_future_latents})
             future_noise = torch.randn(pred_shape, device = latents.device)
@@ -738,7 +739,7 @@ class MiniMaxH3PredictWrapper(Module):
         if exists(video_frames_mask):
             patch_h, patch_w = self.patch_size[1], self.patch_size[2]
             rows_per_frame = (latent_height // patch_h) * (latent_width // patch_w)
-            num_audio_rows = audio_rows.shape[1] if exists(audio_rows) else 0
+            num_audio_rows = size(audio_rows, 'b [n] ...') if exists(audio_rows) else 0
             context_mask = self.get_context_mask(hiddens[0], num_audio_rows, rows_per_frame, video_frames_mask)
             return (hiddens, context_mask) if self.return_list else (hiddens[0], context_mask)
 
@@ -755,7 +756,7 @@ class MiniMaxH3PredictWrapper(Module):
 
         video_mask = repeat(video_frames_mask, 'b f -> b (f r)', r = rows_per_frame)
 
-        num_attended_rows = video_mask.shape[-1]
+        num_attended_rows = size(video_mask, '... [n]')
         device = video_mask.device
 
         num_video_rows = seq_len - num_audio_rows
@@ -833,7 +834,7 @@ class MiniMaxH3PredictWrapper(Module):
                     videos, texts = batch_items
                     audios = None
 
-                batch = videos.shape[0]
+                batch = size(videos, '[b] ...')
                 videos = rearrange(videos, 'b t c h w -> b c t h w').to(device)
                 videos = self.normalize(videos)
 
@@ -860,7 +861,7 @@ class MiniMaxH3PredictWrapper(Module):
                 noise = torch.randn_like(latents)
                 audio_noise = torch.randn_like(audio_rows) if exists(audio_rows) else None
 
-                frames = latents.shape[2]
+                frames = size(latents, 'b c [f] ...')
                 use_fixed_prefix = train_fixed_video_prefix_max_delay > 0
                 total_loss = torch.tensor(0., device = device)
 
@@ -884,12 +885,13 @@ class MiniMaxH3PredictWrapper(Module):
                     audio_rows_i = audio_noise_i = None
 
                     if exists(audio_rows):
-                        audio_ts = repeat(ts[i:i+1], '1 -> 1 n 1', n = audio_rows.shape[1])
+                        audio_ts = repeat(ts[i:i+1], '1 -> 1 n 1', n = size(audio_rows, 'b [n] ...'))
                         audio_rows_i = torch.lerp(audio_rows[i:i+1], audio_noise[i:i+1], audio_ts)
                         audio_noise_i = audio_noise[i:i+1]
 
                     video_pred, audio_pred = self._transformer_forward(noisy_latents, encoder_states[i:i+1], 1.0 - padded_ts, text_token_tags, audio_rows = audio_rows_i)
-                    video_pred = self._unpatchify_video_latents(video_pred, frames, latents_i.shape[3], latents_i.shape[4])
+                    latent_height, latent_width = shape(latents_i, 'b c f [h] [w]')
+                    video_pred = self._unpatchify_video_latents(video_pred, frames, latent_height, latent_width)
 
                     loss = F.mse_loss(video_pred, flow_target, reduction = 'none')
 

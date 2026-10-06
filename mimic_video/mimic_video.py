@@ -30,6 +30,8 @@ from torch_einops_utils import (
     temp_eval
 )
 
+from torch_einops_utils.shape import shape, size
+
 # ein notation
 
 # b - batch
@@ -363,7 +365,7 @@ class AttentionPool(Module):
         )
 
     def forward(self, context):
-        batch = context.shape[0]
+        batch = size(context, '[b] ...')
         queries = repeat(self.queries, 'd -> b 1 d', b = batch)
         return self.pooler(queries, context = context).squeeze(1)
 
@@ -425,7 +427,7 @@ class Actor(Module):
     ):
         assert 'actions' not in kwargs, 'actions should not be passed into actor'
 
-        batch = joint_state.shape[0]
+        batch = size(joint_state, '[b] ...')
 
         queries = repeat(self.action_queries[int(body_id)], 'n d -> b n d', b = batch)
 
@@ -832,7 +834,7 @@ class MimicVideo(Module):
         # inpaint
 
         if inpainting:
-            prefix_len = prefix_action_chunk.shape[1]
+            prefix_len = size(prefix_action_chunk, 'b [n] ...')
             assert prefix_len < self.action_chunk_len
 
             maybe_normed_prefix = normalizer.normalize(prefix_action_chunk) if exists(normalizer) else prefix_action_chunk
@@ -936,7 +938,7 @@ class MimicVideo(Module):
         # fixed point per euler step - x_k = x_{k+1} - dt * v(x_k, t_k)
         # explicit reverse too coarse for few step flow heads - https://arxiv.org/abs/2607.08877
 
-        batch = actions.shape[0]
+        batch = size(actions, '[b] ...')
         delta = 1. / steps
         latents = actions
 
@@ -1005,7 +1007,7 @@ class MimicVideo(Module):
 
         body_id = int(body_id)
 
-        assert actions.shape[-2:] == self.action_shapes[body_id]
+        assert shape(actions, '... h w -> h w') == self.action_shapes[body_id]
 
         to_action_tokens = self.to_action_tokens[body_id]
         to_pred = self.to_pred[body_id]
@@ -1017,7 +1019,8 @@ class MimicVideo(Module):
         if exists(normalizer):
             actions = normalizer.normalize(actions)
 
-        batch, seq_len, device = actions.shape[0], actions.shape[1], actions.device
+        batch, seq_len = shape(actions, 'b n ... -> b n')
+        device = actions.device
         orig_actions = actions
 
         is_training = not exists(time) and not return_flow
@@ -1041,7 +1044,7 @@ class MimicVideo(Module):
         # handle multi-view
 
         has_multi_view = exists(video) and video.ndim == 6
-        num_views = video.shape[1] if has_multi_view else 1
+        num_views = size(video, 'b [v] ...') if has_multi_view else 1
 
         if has_multi_view:
             assert num_views == self.num_video_viewpoints
@@ -1058,7 +1061,7 @@ class MimicVideo(Module):
                     prompts = [p for p in prompts for _ in range(num_views)]
 
             if exists(time_video_denoise):
-                num_time_steps = time_video_denoise.shape[0]
+                num_time_steps = size(time_video_denoise, '[b] ...')
                 assert num_time_steps == batch
 
         if not exists(time_video_denoise):
@@ -1070,7 +1073,7 @@ class MimicVideo(Module):
             if time_video_denoise.ndim == 0:
                 time_video_denoise = rearrange(time_video_denoise, '-> 1')
 
-            num_time_steps = time_video_denoise.shape[0]
+            num_time_steps = size(time_video_denoise, '[b] ...')
 
             if num_time_steps != batch:
                 time_video_denoise = repeat(time_video_denoise, '1 -> b', b = batch)
@@ -1243,7 +1246,7 @@ class MimicVideo(Module):
                 time = repeat(time, '-> b', b = batch)
 
             if time.ndim == 2:
-                time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = time.shape[-1])
+                time_video_denoise = repeat(time_video_denoise, 'b -> b n', n = size(time, 'b [n]'))
 
             times = stack((time, time_video_denoise), dim = -1)
 
@@ -1260,7 +1263,7 @@ class MimicVideo(Module):
         register_tokens = empty_token
 
         if self.has_register_tokens:
-            num_tokens = tokens.shape[0]
+            num_tokens = size(tokens, '[b] ...')
             register_tokens = repeat(self.register_tokens, 'n d -> b n d', b = num_tokens)
 
         # one layer of rnn for actions
@@ -1463,7 +1466,7 @@ class MimicVideo(Module):
             zero = self.zero
 
             if unreduced_loss:
-                num_actions = actions.shape[0]
+                num_actions = size(actions, '[b] ...')
                 zero = repeat(zero, '-> b', b = num_actions)
 
             state_autoencoder_loss = joint_latent_dynamics_loss = zero
